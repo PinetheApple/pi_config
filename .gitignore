@@ -6,7 +6,6 @@ bin/
 
 # Pi runtime and private state
 sessions/
-/workflows/
 /npm/
 auth.json
 settings.json
