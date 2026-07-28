@@ -21,19 +21,14 @@ import {
   Scope,
   Stream,
 } from "effect";
-import type { SubagentBackend, SubagentSession } from "./backend.ts";
+import type { SubagentBackend } from "./backend.ts";
 import { BackendRegistry } from "./backend.ts";
 import type {
   BackendName,
-  LiveToolState,
   RunOutcome,
   SpawnTask,
-  SubagentEvent,
-  SubagentOrigin,
-  SubagentMeta,
   SubagentSnapshot,
   SubagentStatus,
-  TranscriptItem,
 } from "./domain.ts";
 import {
   BackendUnavailableError,
@@ -41,68 +36,18 @@ import {
   SendError,
   SpawnError,
 } from "./domain.ts";
+import type { SubagentRecord } from "./record.ts";
+import type { Entry } from "./snapshot.ts";
+import {
+  bounded,
+  createRestoredEntry,
+  FINAL_TEXT_MAX_LENGTH,
+  makeFoldEvent,
+} from "./snapshot.ts";
 
 export const MAX_RUNNING = 4;
 export const MAX_TRACKED = 64;
 const STOP_TIMEOUT_MS = 5_000;
-const ERROR_TEXT_MAX_LENGTH = 4_096;
-const TRANSCRIPT_TEXT_MAX_LENGTH = 64 * 1_024;
-const LIVE_ASSISTANT_MAX_LENGTH = 128 * 1_024;
-const FINAL_TEXT_MAX_LENGTH = 1_024 * 1_024;
-const MAX_TRANSCRIPT_ITEMS = 512;
-
-function bounded(text: string) {
-  return text.slice(0, ERROR_TEXT_MAX_LENGTH);
-}
-
-function boundedTranscriptText(text: string) {
-  return text.slice(0, TRANSCRIPT_TEXT_MAX_LENGTH);
-}
-
-function appendTranscript(snapshot: MutableSnapshot, item: TranscriptItem) {
-  snapshot.transcript.push(item);
-  if (snapshot.transcript.length > MAX_TRANSCRIPT_ITEMS) {
-    snapshot.transcript.splice(
-      0,
-      snapshot.transcript.length - MAX_TRANSCRIPT_ITEMS,
-    );
-  }
-}
-
-// --- Internal state -----------------------------------------------------------
-
-/** Mutable snapshot; exposed to readers via the readonly SubagentSnapshot type. */
-interface MutableSnapshot {
-  id: string;
-  origin: SubagentOrigin;
-  backend: BackendName;
-  title: string;
-  prompt: string;
-  cwd: string;
-  status: SubagentStatus;
-  createdAt: number;
-  settledAt?: number;
-  errorText?: string;
-  meta: SubagentMeta;
-  usage: { tokens?: number; contextWindow?: number };
-  transcript: TranscriptItem[];
-  liveAssistant?: { text: string; thinking: string };
-  liveTools: LiveToolState[];
-  queued: SubagentSnapshot["queued"];
-  finalText: string;
-  turns: number;
-}
-
-interface Entry {
-  snapshot: MutableSnapshot;
-  session: SubagentSession;
-  scope: Scope.Closeable;
-  pump?: Fiber.Fiber<void>;
-  liveToolMap: Map<string, LiveToolState>;
-  /** Idle restart dispatched but RunStarted not folded yet; counts as running
-   * so concurrent restarts cannot race past the cap. */
-  restarting?: boolean;
-}
 
 // --- Read model ----------------------------------------------------------------
 
@@ -119,6 +64,12 @@ export interface SubagentReadModel {
   requestSend(id: string, text: string): void;
   /** Fire-and-forget: abort a running subagent (dashboard `x`, takeover). */
   requestAbort(id: string): void;
+  /**
+   * Fire-and-forget: drop a settled subagent and its transcript (dashboard
+   * `d`). Running subagents and ones an active subagent_wait still cares about
+   * are left alone — abort first, then forget.
+   */
+  requestForget(id: string): void;
   /**
    * Register the settle hook. `consumed` is true when an active
    * subagent_wait/cancel is collecting the result (so it must not also be
@@ -161,6 +112,12 @@ export interface SubagentManagerShape {
     ids: ReadonlyArray<string>,
   ): Effect.Effect<ReadonlyArray<CancelResult>>;
   send(id: string, text: string): Effect.Effect<void, SendError>;
+  /**
+   * Rehydrate terminal entries from persisted `subagent-record`s (session
+   * resume/fork/reload). Returns how many were adopted. Adopted entries are
+   * inert: no session, no scope, no result delivery.
+   */
+  adopt(records: ReadonlyArray<SubagentRecord>): Effect.Effect<number>;
   get(id: string): Effect.Effect<SubagentSnapshot | undefined>;
   readonly list: Effect.Effect<ReadonlyArray<SubagentSnapshot>>;
   readonly disposeAll: Effect.Effect<void>;
@@ -227,6 +184,18 @@ const makeManager = Effect.gen(function* () {
     });
   });
 
+  /**
+   * Keep fresh spawns from re-minting an id an adopted entry already holds:
+   * both counters restart at 0 in every process, but adopted ids come from a
+   * previous one.
+   */
+  const seedCounters = (id: string) => {
+    const model = /^sa-(\d+)$/.exec(id);
+    if (model) modelCounter = Math.max(modelCounter, Number(model[1]));
+    const btw = /^btw-(\d+)$/.exec(id);
+    if (btw) btwCounter = Math.max(btwCounter, Number(btw[1]));
+  };
+
   const runningCount = () =>
     [...entries.values()].filter(
       (e) => e.snapshot.status === "running" || e.restarting === true,
@@ -243,8 +212,11 @@ const makeManager = Effect.gen(function* () {
     }
   };
 
+  /** No-op for restored entries: they never owned a scope to begin with. */
   const closeEntryScope = (entry: Entry) =>
-    Scope.close(entry.scope, Exit.void).pipe(Effect.ignore);
+    entry.scope
+      ? Scope.close(entry.scope, Exit.void).pipe(Effect.ignore)
+      : Effect.void;
 
   const pruneSettled = () => {
     if (entries.size <= MAX_TRACKED) return;
@@ -311,113 +283,7 @@ const makeManager = Effect.gen(function* () {
     pruneSettled();
   };
 
-  const foldEvent = (entry: Entry, event: SubagentEvent) => {
-    const s = entry.snapshot;
-    switch (event._tag) {
-      case "RunStarted":
-        entry.restarting = false;
-        s.status = "running";
-        s.settledAt = undefined;
-        s.errorText = undefined;
-        break;
-      case "RunSettled":
-        settle(entry, event.outcome);
-        return; // settle() already notified
-      case "UserMessage":
-        appendTranscript(s, {
-          kind: "user",
-          text: boundedTranscriptText(event.text),
-        });
-        break;
-      case "AssistantDelta": {
-        const live = s.liveAssistant ?? { text: "", thinking: "" };
-        s.liveAssistant =
-          event.kind === "text"
-            ? {
-                ...live,
-                text: (live.text + event.delta).slice(
-                  -LIVE_ASSISTANT_MAX_LENGTH,
-                ),
-              }
-            : {
-                ...live,
-                thinking: (live.thinking + event.delta).slice(
-                  -LIVE_ASSISTANT_MAX_LENGTH,
-                ),
-              };
-        break;
-      }
-      case "AssistantMessage":
-        appendTranscript(s, {
-          kind: "assistant",
-          parts: event.parts.map((part) =>
-            part.type === "toolCall"
-              ? {
-                  ...part,
-                  argsPreview: part.argsPreview
-                    ? boundedTranscriptText(part.argsPreview)
-                    : undefined,
-                }
-              : { ...part, text: boundedTranscriptText(part.text) },
-          ),
-        });
-        s.liveAssistant = undefined;
-        s.turns++;
-        break;
-      case "ToolStart":
-        entry.liveToolMap.set(event.toolId, {
-          toolId: event.toolId,
-          name: event.name,
-          argsPreview: event.argsPreview
-            ? boundedTranscriptText(event.argsPreview)
-            : undefined,
-        });
-        s.liveTools = [...entry.liveToolMap.values()];
-        break;
-      case "ToolUpdate": {
-        const current = entry.liveToolMap.get(event.toolId);
-        if (current) {
-          entry.liveToolMap.set(event.toolId, {
-            ...current,
-            outputPreview: event.outputPreview
-              ? boundedTranscriptText(event.outputPreview)
-              : current.outputPreview,
-          });
-          s.liveTools = [...entry.liveToolMap.values()];
-        }
-        break;
-      }
-      case "ToolEnd":
-        entry.liveToolMap.delete(event.toolId);
-        s.liveTools = [...entry.liveToolMap.values()];
-        appendTranscript(s, {
-          kind: "toolResult",
-          toolId: event.toolId,
-          name: event.name,
-          isError: event.isError,
-          outputPreview: event.outputPreview
-            ? boundedTranscriptText(event.outputPreview)
-            : undefined,
-        });
-        break;
-      case "QueueChanged":
-        s.queued = event.queued;
-        break;
-      case "UsageChanged":
-        s.usage = {
-          tokens: event.tokens ?? s.usage.tokens,
-          contextWindow: event.contextWindow ?? s.usage.contextWindow,
-        };
-        break;
-      case "MetaChanged":
-        s.meta = { ...s.meta, ...event.meta };
-        break;
-      case "BackendError":
-        s.errorText = bounded(event.message);
-        break;
-    }
-    notify(s.id);
-  };
+  const foldEvent = makeFoldEvent({ settle, notify });
 
   const spawn = (backendName: BackendName, task: SpawnTask) =>
     Effect.gen(function* () {
@@ -526,6 +392,30 @@ const makeManager = Effect.gen(function* () {
       );
     });
 
+  /**
+   * Insert terminal entries rehydrated from persisted records. Adopted entries
+   * own no session and no scope: they are read-only history, never routed
+   * through `onSettled` (the parent transcript already holds those results)
+   * and never counted against MAX_RUNNING.
+   */
+  const adopt = (records: ReadonlyArray<SubagentRecord>) =>
+    Effect.sync(() => {
+      if (disposed) return 0;
+      // Seed from every record, including ones that do not fit: a dropped id
+      // must still not be re-minted by the next spawn.
+      for (const record of records) seedCounters(record.id);
+      const fresh = records.filter((record) => !entries.has(record.id));
+      const room = Math.max(0, MAX_TRACKED - entries.size);
+      // `records` arrive oldest-first; keep the newest when they do not all fit.
+      const adopted = fresh.slice(Math.max(0, fresh.length - room));
+      for (const record of adopted) {
+        const entry = createRestoredEntry(record);
+        entries.set(entry.snapshot.id, entry);
+      }
+      if (adopted.length > 0) notify();
+      return adopted.length;
+    });
+
   const waitFor = (
     ids: ReadonlyArray<string>,
     onPending?: (pending: string[]) => void,
@@ -557,7 +447,11 @@ const makeManager = Effect.gen(function* () {
   const abortEntry = (entry: Entry) =>
     Effect.gen(function* () {
       if (entry.snapshot.status !== "running") return;
-      const graceful = yield* entry.session.interrupt.pipe(
+      const session = entry.session;
+      // Restored entries are terminal, so this is unreachable in practice;
+      // the guard keeps abort total over the widened Entry shape.
+      if (!session) return;
+      const graceful = yield* session.interrupt.pipe(
         Effect.timeout(STOP_TIMEOUT_MS),
         Effect.result,
       );
@@ -629,6 +523,12 @@ const makeManager = Effect.gen(function* () {
           message: `Subagent "${id}" is no longer tracked.`,
         });
       }
+      const session = entry.session;
+      if (!session) {
+        return new SendError({
+          message: `Subagent "${id}" was restored from an earlier session and cannot be resumed; spawn a new one instead.`,
+        });
+      }
       // Restarting a settled subagent occupies a running slot again, so it
       // must respect the same cap as spawn. Steering an already-running one
       // does not consume additional capacity.
@@ -643,7 +543,7 @@ const makeManager = Effect.gen(function* () {
         // both pass the check in that window. Cleared by RunStarted/settle,
         // or here when the backend rejects the send.
         entry.restarting = true;
-        return entry.session.send(text).pipe(
+        return session.send(text).pipe(
           Effect.onError(() =>
             Effect.sync(() => {
               entry.restarting = false;
@@ -651,7 +551,7 @@ const makeManager = Effect.gen(function* () {
           ),
         );
       }
-      return entry.session.send(text);
+      return session.send(text);
     });
 
   const disposeAll = Effect.gen(function* () {
@@ -703,10 +603,23 @@ const makeManager = Effect.gen(function* () {
     },
     requestAbort: (id) => {
       const entry = entries.get(id);
-      if (!entry) return;
+      // Restored entries are terminal history: nothing to abort.
+      if (!entry || !entry.session) return;
       // UI-initiated aborts are not "consumed": the failed result still
       // flows back to the parent as a follow-up message, matching v1.
       runDetached(abortEntry(entry).pipe(Effect.ignore));
+    },
+    requestForget: (id) => {
+      const entry = entries.get(id);
+      if (!entry) return;
+      if (entry.snapshot.status === "running") return;
+      if (waitInterest.has(id)) return;
+      entries.delete(id);
+      idListeners.delete(id);
+      const fiber = runDetached(closeEntryScope(entry));
+      cleanups.add(fiber);
+      fiber.addObserver(() => cleanups.delete(fiber));
+      notify();
     },
     setOnSettled: (hook) => {
       onSettled = hook;
@@ -722,6 +635,7 @@ const makeManager = Effect.gen(function* () {
     waitFor,
     cancel,
     send,
+    adopt,
     get: (id) => Effect.sync(() => entries.get(id)?.snapshot),
     list: Effect.sync(() => [...entries.values()].map((e) => e.snapshot)),
     disposeAll,
