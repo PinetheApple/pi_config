@@ -6,7 +6,6 @@ This setup is fairly opinionated, it:
 - updates the bottom bar to have the info I prefer to see
 - adds background terminals + ui to manage them
 - adds subagents to pi
-- adds workflows to pi
 - adds an ask user tool, which lets the model ask multiple choice questions
 - adds first-class `fd` (file discovery) and `rg` (content search) tools
 

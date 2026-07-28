@@ -8,6 +8,10 @@
 > - Reference implementations: `extensions/subagents` (Effect v4 service/manager/read-model/tools)
 >   and `extensions/workflows` (dashboard UI, status line, background completion follow-ups).
 >
+> **Historical note:** `extensions/workflows` has since been removed from this repo. This
+> document is a record of the research phase and is left as written; every `workflows/...`
+> citation below refers to code that now only exists in git history.
+>
 > Read alongside `extensions/subagents/docs/effect-v4-notes.md` (API cheat sheet) and
 > `extensions/subagents/docs/effect-v4-extension-guide.md` (toolchain + ManagedRuntime boundary).
 > Those two documents are authoritative for Effect v4 API names — do not use v3 APIs
