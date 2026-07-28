@@ -1,15 +1,17 @@
 /**
  * Pure view model for /usage: source data in, laid-out rows out. Nothing here
- * touches the TUI, so the bar math and width degradation are unit-testable.
+ * touches the TUI, so the bar math, table geometry and width degradation stay
+ * unit-testable.
  */
 
-import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { UsageSummary } from "../../../shared/usage-totals.ts";
 import {
-  formatCost,
   formatPercent,
   formatRelativeToNow,
   formatTokens,
+  homeRelative,
+  modelLabel,
   pad,
 } from "../format.ts";
 import { QUOTA_LABELS, type ClaudeQuota } from "./claude.ts";
@@ -21,61 +23,35 @@ import {
   SEVERITY_MARKERS,
   type Severity,
 } from "./bar.ts";
-import type { OpencodeRead } from "./opencode.ts";
-import type { SessionScan } from "./pi.ts";
-import { USAGE_WINDOWS, WINDOW_LABELS } from "./window.ts";
+import { OPENCODE_DB_PATH, type OpencodeRead } from "./opencode.ts";
+import { sumModelWindows, type ModelBucket, type SessionScan } from "./pi.ts";
+import {
+  breakdownRows,
+  sourceRow,
+  windowRows,
+  type GaugeRow,
+  type TextRow,
+  type UsageRow,
+  type UsageSection,
+  type UsageView,
+} from "./rows.ts";
+import { clip, layoutTable } from "./table.ts";
+import { WINDOW_LABELS } from "./window.ts";
+
+export { clip };
+export * from "./rows.ts";
 
 export const GAUGE_INDENT = "  ";
 /** Widest percentage is "100%", plus one column of separation from the bar. */
 export const PERCENT_WIDTH = 5;
 export const TEXT_LABEL_WIDTH = 16;
-/** Enough model rows to be useful without turning the panel into a table. */
-export const MAX_MODEL_ROWS = 6;
+/** pi providers billed by opencode Zen: "opencode" and "opencode-go". */
+const OPENCODE_PROVIDER_PREFIX = "opencode";
 
-export const OPENCODE_QUOTA_NOTE =
-  "unavailable — opencode Zen publishes no usage or quota endpoint";
-
-export interface GaugeRow {
-  kind: "gauge";
-  label: string;
-  fraction: number | undefined;
-  note?: string;
-}
-
-export interface TextRow {
-  kind: "text";
-  label?: string;
-  value: string;
-}
-
-export type UsageRow = GaugeRow | TextRow;
-
-export interface UsageSection {
-  heading: string;
-  rows: UsageRow[];
-}
-
-export interface UsageView {
-  title: string;
-  sections: UsageSection[];
-  footer: string;
-}
-
-const ELLIPSIS = "…";
-
-/** Column-accurate clip that never injects ANSI, so the view model stays plain. */
-export function clip(text: string, width: number) {
-  if (width <= 0) return "";
-  if (visibleWidth(text) <= width) return text;
-
-  const characters = [...text];
-  let out = "";
-  for (const character of characters) {
-    if (visibleWidth(out + character) > width - 1) break;
-    out += character;
-  }
-  return out + ELLIPSIS;
-}
+export const OPENCODE_QUOTA_NOTE = "not published by opencode Zen";
+export const OPENCODE_APP_HEADING = "opencode app";
+export const OPENCODE_VIA_PI_HEADING = "opencode via pi";
+export const OPENCODE_DB_SOURCE = homeRelative(OPENCODE_DB_PATH);
 
 export interface GaugeLayout {
   label: string;
@@ -119,20 +95,6 @@ export function textRowLine(row: TextRow) {
     : row.value;
 }
 
-function summaryLine(summary: UsageSummary) {
-  return [
-    `${formatTokens(summary.totalTokens)} tok`,
-    `in ${formatTokens(summary.input)}`,
-    `out ${formatTokens(summary.output)}`,
-    `cache r/w ${formatTokens(summary.cacheRead)}/${formatTokens(summary.cacheWrite)}`,
-    formatCost(summary.cost),
-  ].join(" · ");
-}
-
-function sessions(count: number) {
-  return `${count} ${count === 1 ? "session" : "sessions"}`;
-}
-
 function resetNote(resetsAt: Date | undefined, now: Date) {
   if (!resetsAt) return "Reset time unknown";
   const absolute = resetsAt.toLocaleString("en-US", {
@@ -164,81 +126,134 @@ export function buildClaudeSection(
   };
 }
 
-export function buildOpencodeSection(result: OpencodeRead): UsageSection {
+export function isOpencodeProvider(provider: string) {
+  return (
+    provider === OPENCODE_PROVIDER_PREFIX ||
+    provider.startsWith(`${OPENCODE_PROVIDER_PREFIX}-`)
+  );
+}
+
+/** opencode-billed turns pi ran itself — the only place opencode-go usage exists. */
+export function buildOpencodeViaPiSection(
+  scan: SessionScan | undefined,
+  sessionsRoot: string,
+): UsageSection {
+  const heading = OPENCODE_VIA_PI_HEADING;
   const rows: UsageRow[] = [
+    sourceRow(
+      homeRelative(sessionsRoot),
+      "turns pi ran through an opencode provider (a subset of the pi section)",
+    ),
     { kind: "text", label: "Plan quota", value: OPENCODE_QUOTA_NOTE },
   ];
 
+  if (!scan) {
+    rows.push({ kind: "text", value: "session directory unreadable" });
+    return { heading, rows };
+  }
+
+  const models: ModelBucket[] = scan.models.filter((bucket) =>
+    isOpencodeProvider(bucket.provider),
+  );
+  const windows = sumModelWindows(models);
+
+  rows.push(
+    ...windowRows(
+      (window) => ({
+        label: WINDOW_LABELS[window],
+        usage: windows[window],
+        count: windows[window].messages,
+      }),
+      "replies",
+    ),
+    ...breakdownRows(
+      models.map((bucket) => ({
+        label: modelLabel(bucket.provider, bucket.model),
+        usage: bucket.windows.all,
+        count: bucket.windows.all.messages,
+      })),
+      windows.all.totalTokens,
+      "replies",
+    ),
+  );
+
+  return { heading, rows };
+}
+
+/** Sessions run in the opencode app itself; pi never writes to this database. */
+export function buildOpencodeAppSection(result: OpencodeRead): UsageSection {
+  const heading = OPENCODE_APP_HEADING;
+  const rows: UsageRow[] = [
+    sourceRow(
+      OPENCODE_DB_SOURCE,
+      "sessions run in the opencode app, not through pi",
+    ),
+  ];
+
   if (!result.ok) {
-    rows.push({
-      kind: "text",
-      value: `local session records unavailable — ${result.reason}`,
-    });
-    return { heading: "opencode", rows };
+    rows.push({ kind: "text", value: `unavailable — ${result.reason}` });
+    return { heading, rows };
   }
 
-  for (const window of USAGE_WINDOWS) {
-    const bucket = result.totals.windows[window];
-    rows.push({
-      kind: "text",
-      label: WINDOW_LABELS[window],
-      value: `${summaryLine(bucket.usage)} (${sessions(bucket.sessions)})`,
-    });
-  }
+  const { windows, byModel } = result.totals;
+  rows.push(
+    ...windowRows(
+      (window) => ({
+        label: WINDOW_LABELS[window],
+        usage: windows[window].usage,
+        count: windows[window].sessions,
+      }),
+      "sessions",
+    ),
+    ...breakdownRows(
+      byModel.map((bucket) => ({
+        label: modelLabel(bucket.provider, bucket.model),
+        usage: bucket.usage,
+        count: bucket.sessions,
+      })),
+      windows.all.usage.totalTokens,
+      "sessions",
+    ),
+  );
 
-  const total = result.totals.windows.all.usage.totalTokens;
-  const top = result.totals.byModel.slice(0, MAX_MODEL_ROWS);
-  if (top.length > 0) {
-    rows.push({
-      kind: "text",
-      value: `Share of all-time tokens (${sessions(result.totals.rows)}):`,
-    });
-    for (const bucket of top) {
-      rows.push({
-        kind: "gauge",
-        label: `${bucket.provider}/${bucket.model}`,
-        fraction: total > 0 ? bucket.usage.totalTokens / total : undefined,
-        note: `${summaryLine(bucket.usage)} · ${sessions(bucket.sessions)}`,
-      });
-    }
-  }
-
-  return { heading: "opencode", rows };
+  return { heading, rows };
 }
 
 export function buildPiSection(
   branch: UsageSummary,
   scan: SessionScan | undefined,
+  sessionsRoot: string,
 ): UsageSection {
   const rows: UsageRow[] = [
+    sourceRow(homeRelative(sessionsRoot), "every provider pi has talked to"),
     {
       kind: "text",
       label: "This session",
-      value: `${summaryLine(branch)} (${branch.messages} replies)`,
+      value: `${formatTokens(branch.totalTokens)} tok · ${branch.messages} replies`,
     },
   ];
 
   if (!scan) {
-    rows.push({
-      kind: "text",
-      label: "Other windows",
-      value: "session directory unreadable",
-    });
+    rows.push({ kind: "text", value: "session directory unreadable" });
     return { heading: "pi", rows };
   }
 
-  for (const window of USAGE_WINDOWS) {
-    rows.push({
+  rows.push(
+    ...windowRows(
+      (window) => ({
+        label: WINDOW_LABELS[window],
+        usage: scan.windows[window],
+        count: scan.windows[window].messages,
+      }),
+      "replies",
+    ),
+    {
       kind: "text",
-      label: WINDOW_LABELS[window],
-      value: summaryLine(scan.windows[window]),
-    });
-  }
-  rows.push({
-    kind: "text",
-    label: "Scanned",
-    value: `${scan.filesScanned} of ${scan.filesAvailable} session files for this cwd${scan.truncated ? " (capped)" : ""}`,
-  });
+      label: "Scanned",
+      value: `${scan.filesScanned} of ${scan.filesAvailable} session files${scan.truncated ? " (capped)" : ""}`,
+      dim: true,
+    },
+  );
 
   return { heading: "pi", rows };
 }
@@ -246,6 +261,7 @@ export function buildPiSection(
 export interface UsageSources {
   branch: UsageSummary;
   scan: SessionScan | undefined;
+  sessionsRoot: string;
   opencode: OpencodeRead;
   quota: ClaudeQuota;
   now: Date;
@@ -256,11 +272,12 @@ export function buildUsageView(sources: UsageSources): UsageView {
     title: "Usage",
     sections: [
       buildClaudeSection(sources.quota, sources.now),
-      buildOpencodeSection(sources.opencode),
-      buildPiSection(sources.branch, sources.scan),
+      buildOpencodeViaPiSection(sources.scan, sources.sessionsRoot),
+      buildOpencodeAppSection(sources.opencode),
+      buildPiSection(sources.branch, sources.scan, sources.sessionsRoot),
     ],
     footer:
-      "pi and opencode figures are read from local session records. Claude Code plan figures come from an undocumented OAuth endpoint that may change or disappear without notice.",
+      "Every section names the local file it was read from. Bars mean consumption of a published limit, so only the Claude Code plan has them. Claude Code figures come from an undocumented OAuth endpoint that may change or disappear without notice.",
   };
 }
 
@@ -270,8 +287,15 @@ export function renderUsageText(view: UsageView, width: number) {
   for (const section of view.sections) {
     lines.push("", section.heading);
     for (const row of section.rows) {
-      if (row.kind === "text") lines.push(clip(textRowLine(row), width));
-      else lines.push(...gaugeLines(layoutGauge(row, width)));
+      // Wrap rather than clip, so the overlay and the plain path agree.
+      if (row.kind === "text")
+        lines.push(...wrapTextWithAnsi(textRowLine(row), width));
+      else if (row.kind === "gauge")
+        lines.push(...gaugeLines(layoutGauge(row, width)));
+      else {
+        const table = layoutTable(row.spec, width);
+        lines.push(table.head, ...table.rows);
+      }
     }
   }
   lines.push("", ...wrapTextWithAnsi(view.footer, width));

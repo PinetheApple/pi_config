@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { sumEntryUsage } from "../shared/usage-totals.ts";
-import { accumulateJsonl, scanSessionDir } from "./src/usage/pi.ts";
+import {
+  accumulateJsonl,
+  scanSessionDir,
+  sumModelWindows,
+} from "./src/usage/pi.ts";
 import { inWindow, windowStart } from "./src/usage/window.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -22,7 +26,13 @@ function usage(input: number, output: number, cost: number) {
   };
 }
 
-function assistantLine(at: Date, input: number, output: number, cost: number) {
+function assistantLine(
+  at: Date,
+  input: number,
+  output: number,
+  cost: number,
+  model?: { provider: string; model: string },
+) {
   return JSON.stringify({
     type: "message",
     id: `a-${at.getTime()}`,
@@ -31,6 +41,7 @@ function assistantLine(at: Date, input: number, output: number, cost: number) {
     message: {
       role: "assistant",
       content: [],
+      ...model,
       usage: usage(input, output, cost),
     },
   });
@@ -111,7 +122,7 @@ test("accumulateJsonl buckets records by window and ignores noise", () => {
     "",
   ].join("\n");
 
-  const windows = accumulateJsonl(content, NOW);
+  const windows = sumModelWindows(accumulateJsonl(content, NOW).values());
   assert.equal(windows.today.input, 100);
   assert.equal(windows.today.messages, 1);
   assert.equal(windows["7d"].input, 300);
@@ -119,6 +130,37 @@ test("accumulateJsonl buckets records by window and ignores noise", () => {
   assert.equal(windows.all.input, 1500);
   assert.equal(windows.all.messages, 4);
   assert.equal(windows.all.cost.toFixed(2), "1.50");
+});
+
+test("accumulateJsonl keys buckets by provider/model and falls back to unknown", () => {
+  const content = [
+    assistantLine(NOW, 10, 1, 0.5, {
+      provider: "opencode-go",
+      model: "kimi-k3",
+    }),
+    assistantLine(NOW, 20, 2, 0.25, {
+      provider: "opencode-go",
+      model: "kimi-k3",
+    }),
+    assistantLine(NOW, 5, 1, 0, { provider: "ollama", model: "qwen3.5:9b" }),
+    assistantLine(NOW, 7, 1, 0),
+  ].join("\n");
+
+  const buckets = accumulateJsonl(content, NOW);
+  assert.deepEqual([...buckets.keys()].sort(), [
+    "ollama/qwen3.5:9b",
+    "opencode-go/kimi-k3",
+    "unknown/unknown",
+  ]);
+
+  const kimi = buckets.get("opencode-go/kimi-k3");
+  assert.equal(kimi?.windows.all.input, 30);
+  assert.equal(kimi?.windows.all.messages, 2);
+  assert.equal(kimi?.windows.all.cost, 0.75);
+  assert.equal(buckets.get("unknown/unknown")?.provider, "unknown");
+
+  // The folded total must still match the flat sum over every model.
+  assert.equal(sumModelWindows(buckets.values()).all.input, 42);
 });
 
 test("scanSessionDir aggregates jsonl files and reports counts", async () => {
@@ -141,6 +183,35 @@ test("scanSessionDir aggregates jsonl files and reports counts", async () => {
   assert.equal(scan.windows.all.input, 30);
   assert.equal(scan.windows["7d"].input, 10);
   assert.equal(scan.windows["30d"].input, 30);
+});
+
+test("scanSessionDir recurses into per-cwd dirs and ranks models by tokens", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cc-root-"));
+  const projectA = join(root, "--home-a--");
+  const projectB = join(root, "--home-b--");
+  await mkdir(projectA);
+  await mkdir(projectB);
+
+  await writeFile(
+    join(projectA, "a.jsonl"),
+    assistantLine(NOW, 5, 1, 0, { provider: "ollama", model: "qwen3.5:9b" }),
+  );
+  await writeFile(
+    join(projectB, "b.jsonl"),
+    assistantLine(NOW, 100, 10, 0.04, {
+      provider: "opencode-go",
+      model: "kimi-k3",
+    }),
+  );
+
+  const scan = await scanSessionDir(root, NOW);
+  assert.ok(scan);
+  assert.equal(scan.filesAvailable, 2);
+  assert.equal(scan.windows.all.input, 105);
+  assert.deepEqual(
+    scan.models.map((bucket) => `${bucket.provider}/${bucket.model}`),
+    ["opencode-go/kimi-k3", "ollama/qwen3.5:9b"],
+  );
 });
 
 test("scanSessionDir returns undefined for a missing directory", async () => {

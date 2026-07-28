@@ -11,18 +11,25 @@ import {
   severityOf,
 } from "./src/usage/bar.ts";
 import type { ClaudeQuota } from "./src/usage/claude.ts";
-import type { OpencodeRead } from "./src/usage/opencode.ts";
 import { buildOverlayLines, type UsageTheme } from "./src/usage/overlay.ts";
+import { emptyUsageByWindow, sumModelWindows } from "./src/usage/pi.ts";
+import { layoutTable } from "./src/usage/table.ts";
 import {
   buildClaudeSection,
-  buildOpencodeSection,
+  buildOpencodeAppSection,
+  buildOpencodeViaPiSection,
   buildPiSection,
   buildUsageView,
   gaugeLines,
+  isOpencodeProvider,
   layoutGauge,
+  OPENCODE_APP_HEADING,
+  OPENCODE_DB_SOURCE,
   OPENCODE_QUOTA_NOTE,
+  OPENCODE_VIA_PI_HEADING,
   renderUsageText,
   type GaugeRow,
+  type UsageRow,
 } from "./src/usage/view.ts";
 
 const NOW = new Date(2026, 6, 27, 12, 0, 0);
@@ -159,14 +166,14 @@ test("buildClaudeSection reports unavailability instead of a fake bar", () => {
   ]);
 });
 
-function opencodeRead(): OpencodeRead {
+function opencodeRead() {
   const usage = (tokens: number) => ({
     ...emptyUsageSummary(),
     totalTokens: tokens,
     input: tokens,
   });
   return {
-    ok: true,
+    ok: true as const,
     totals: {
       windows: {
         all: { usage: usage(1000), sessions: 3 },
@@ -193,32 +200,160 @@ function opencodeRead(): OpencodeRead {
   };
 }
 
-test("buildOpencodeSection states quota is unavailable and bars model share", () => {
-  const section = buildOpencodeSection(opencodeRead());
-  const quotaRow = section.rows[0];
-  assert.equal(quotaRow?.kind === "text" && quotaRow.label, "Plan quota");
-  assert.equal(
-    quotaRow?.kind === "text" && quotaRow.value,
-    OPENCODE_QUOTA_NOTE,
+const SESSIONS_ROOT = "/home/tester/.pi/agent/sessions";
+
+function bucket(
+  provider: string,
+  model: string,
+  tokens: number,
+  cost = 0,
+  messages = 1,
+) {
+  const windows = emptyUsageByWindow();
+  for (const window of ["all", "today", "7d", "30d"] as const) {
+    Object.assign(windows[window], {
+      totalTokens: tokens,
+      input: tokens,
+      cost,
+      messages,
+    });
+  }
+  return { provider, model, windows };
+}
+
+function piScan(models = [bucket("opencode-go", "kimi-k3", 750, 0.04, 3)]) {
+  return {
+    windows: sumModelWindows(models),
+    models,
+    filesScanned: 2,
+    filesAvailable: 2,
+    truncated: false,
+  };
+}
+
+function tables(section: { rows: UsageRow[] }) {
+  return section.rows.filter((row) => row.kind === "table");
+}
+
+function firstTableLines(section: { rows: UsageRow[] }, width: number) {
+  const table = tables(section)[0];
+  assert.ok(table?.kind === "table");
+  return layoutTable(table.spec, width);
+}
+
+test("isOpencodeProvider matches the Zen providers and nothing else", () => {
+  assert.equal(isOpencodeProvider("opencode"), true);
+  assert.equal(isOpencodeProvider("opencode-go"), true);
+  assert.equal(isOpencodeProvider("ollama"), false);
+  assert.equal(isOpencodeProvider("opencodex"), false);
+});
+
+test("buildOpencodeViaPiSection names its source and keeps only Zen providers", () => {
+  const section = buildOpencodeViaPiSection(
+    piScan([
+      bucket("opencode-go", "kimi-k3", 750, 0.04, 3),
+      bucket("opencode", "glm-5", 250, 0, 1),
+      bucket("ollama", "qwen3.5:9b", 9000, 0, 5),
+    ]),
+    SESSIONS_ROOT,
   );
 
-  const gauges = section.rows.filter((row) => row.kind === "gauge");
-  assert.equal(gauges.length, 2);
-  assert.equal(gauges[0]?.kind === "gauge" && gauges[0].fraction, 0.75);
-  assert.equal(gauges[1]?.kind === "gauge" && gauges[1].fraction, 0.25);
-  assert.equal(
-    gauges[0]?.kind === "gauge" && gauges[0].label,
-    "opencode-go/kimi-k2.6",
+  assert.equal(section.heading, OPENCODE_VIA_PI_HEADING);
+  const source = section.rows[0];
+  assert.ok(source?.kind === "text" && source.dim);
+  assert.ok(source.kind === "text" && source.value.includes(SESSIONS_ROOT));
+
+  const quota = section.rows[1];
+  assert.equal(quota?.kind === "text" && quota.label, "Plan quota");
+  assert.equal(quota?.kind === "text" && quota.value, OPENCODE_QUOTA_NOTE);
+
+  // The ollama bucket must not leak in, and shares are over the Zen total only.
+  const models = tables(section)[1];
+  assert.ok(models?.kind === "table");
+  assert.deepEqual(
+    models.spec.rows.map((row) => [row[0], row[1], row[2]]),
+    [
+      ["opencode-go/kimi-k3", "750", "75%"],
+      ["opencode/glm-5", "250", "25%"],
+    ],
   );
 });
 
-test("buildOpencodeSection keeps the quota row when the database is unreadable", () => {
-  const section = buildOpencodeSection({ ok: false, reason: "no such file" });
-  assert.equal(section.rows.length, 2);
-  assert.equal(
-    section.rows[0]?.kind === "text" && section.rows[0].label,
-    "Plan quota",
+test("buildOpencodeViaPiSection surfaces opencode-go cost but hides an all-zero cost column", () => {
+  const withCost = firstTableLines(
+    buildOpencodeViaPiSection(piScan(), SESSIONS_ROOT),
+    WIDE,
   );
+  assert.ok(withCost.head.includes("cost"));
+  assert.ok(withCost.rows[0]?.includes("$0.04"));
+
+  const free = firstTableLines(
+    buildOpencodeViaPiSection(
+      piScan([bucket("opencode", "glm-5", 250, 0, 1)]),
+      SESSIONS_ROOT,
+    ),
+    WIDE,
+  );
+  assert.ok(!free.head.includes("cost"));
+  assert.ok(!free.rows.some((row) => row.includes("$")));
+});
+
+test("buildOpencodeViaPiSection reports no activity instead of zero rows", () => {
+  const section = buildOpencodeViaPiSection(piScan([]), SESSIONS_ROOT);
+  assert.equal(tables(section).length, 0);
+  assert.ok(
+    section.rows.some(
+      (row) => row.kind === "text" && row.value === "no recorded activity",
+    ),
+  );
+});
+
+test("buildOpencodeAppSection names the database and collapses idle windows", () => {
+  const read = opencodeRead();
+  read.totals.windows.today = { usage: emptyUsageSummary(), sessions: 0 };
+
+  const section = buildOpencodeAppSection(read);
+  assert.equal(section.heading, OPENCODE_APP_HEADING);
+  const source = section.rows[0];
+  assert.ok(
+    source?.kind === "text" && source.value.includes(OPENCODE_DB_SOURCE),
+  );
+
+  const windows = tables(section)[0];
+  assert.ok(windows?.kind === "table");
+  assert.deepEqual(
+    windows.spec.rows.map((row) => row[0]),
+    ["all time", "last 7 days", "last 30 days"],
+  );
+  assert.ok(
+    section.rows.some(
+      (row) => row.kind === "text" && row.value === "no activity: today",
+    ),
+  );
+});
+
+test("buildOpencodeAppSection labels unrecorded models instead of unknown/unknown", () => {
+  const read = opencodeRead();
+  read.totals.byModel = [
+    {
+      provider: "unknown",
+      model: "unknown",
+      usage: read.totals.byModel[0]!.usage,
+      sessions: 16,
+    },
+  ];
+  const section = buildOpencodeAppSection(read);
+  const models = tables(section)[1];
+  assert.ok(models?.kind === "table");
+  assert.equal(models.spec.rows[0]?.[0], "(model not recorded)");
+});
+
+test("buildOpencodeAppSection degrades to one reason line when the database is unreadable", () => {
+  const section = buildOpencodeAppSection({
+    ok: false,
+    reason: "no such file",
+  });
+  assert.equal(tables(section).length, 0);
   assert.ok(
     section.rows[1]?.kind === "text" &&
       section.rows[1].value.includes("no such file"),
@@ -226,13 +361,38 @@ test("buildOpencodeSection keeps the quota row when the database is unreadable",
 });
 
 test("buildPiSection falls back when the session directory is unreadable", () => {
-  const section = buildPiSection(emptyUsageSummary(), undefined);
+  const section = buildPiSection(emptyUsageSummary(), undefined, SESSIONS_ROOT);
   assert.equal(section.heading, "pi");
-  assert.equal(section.rows.length, 2);
   assert.equal(
-    section.rows[1]?.kind === "text" && section.rows[1].value,
+    section.rows.at(-1)?.kind === "text" &&
+      (section.rows.at(-1) as { value: string }).value,
     "session directory unreadable",
   );
+});
+
+test("layoutTable right-aligns numbers, clips the label, and drops columns when narrow", () => {
+  const spec = {
+    head: ["model", "tokens", "share", "replies"],
+    rows: [["opencode-go/a-very-long-model-name", "750", "75%", "3"]],
+    minColumns: 2,
+  };
+
+  const wide = layoutTable(spec, 80);
+  assert.ok(wide.head.endsWith("replies"));
+  assert.ok(wide.rows[0]?.endsWith("      3"));
+  assert.ok(wide.rows[0]?.startsWith("opencode-go/a-very-long-model-name"));
+
+  const narrow = layoutTable(spec, 24);
+  assert.ok(!narrow.head.includes("replies"));
+  for (const line of [narrow.head, ...narrow.rows]) {
+    assert.ok(line.length <= 24, line);
+  }
+  assert.ok(narrow.rows[0]?.includes("…"));
+
+  // minColumns is a floor: the label and the headline number always survive.
+  const tiny = layoutTable(spec, 4);
+  assert.ok(tiny.head.includes("tokens"));
+  assert.ok(tiny.rows[0]?.includes("750"));
 });
 
 /** Records the colour each line was given so tests can assert on severity. */
@@ -247,6 +407,7 @@ test("buildOverlayLines colours gauges by severity and keeps text plain", () => 
   const view = buildUsageView({
     branch: emptyUsageSummary(),
     scan: undefined,
+    sessionsRoot: SESSIONS_ROOT,
     opencode: { ok: false, reason: "no such file" },
     quota: {
       ok: true,
@@ -269,6 +430,7 @@ test("buildOverlayLines drops the bar rather than overflowing a narrow overlay",
   const view = buildUsageView({
     branch: emptyUsageSummary(),
     scan: undefined,
+    sessionsRoot: SESSIONS_ROOT,
     opencode: { ok: false, reason: "no such file" },
     quota: {
       ok: true,
@@ -287,18 +449,43 @@ test("buildOverlayLines drops the bar rather than overflowing a narrow overlay",
 test("renderUsageText renders every section without a TUI", () => {
   const view = buildUsageView({
     branch: emptyUsageSummary(),
-    scan: undefined,
+    scan: piScan(),
+    sessionsRoot: SESSIONS_ROOT,
     opencode: opencodeRead(),
-    quota: { ok: false, reason: "no credentials" },
+    quota: {
+      ok: true,
+      windows: [{ key: "five_hour", utilization: 0.5, resetsAt: undefined }],
+    },
     now: NOW,
   });
 
   const text = renderUsageText(view, WIDE);
   assert.ok(text.startsWith("Usage"));
   assert.ok(text.includes("Claude Code plan"));
-  assert.ok(text.includes("unavailable — no credentials"));
+  assert.ok(text.includes(OPENCODE_VIA_PI_HEADING));
+  assert.ok(text.includes(OPENCODE_APP_HEADING));
   assert.ok(text.includes(OPENCODE_QUOTA_NOTE));
+  assert.ok(text.includes(OPENCODE_DB_SOURCE));
+  assert.ok(text.includes("opencode-go/kimi-k3"));
   assert.ok(text.includes("opencode-go/kimi-k2.6"));
-  assert.ok(text.includes("█"));
+  // Bars stay exclusive to the quota section, which is the only real limit.
+  assert.equal(text.split("█").length - 1 > 0, true);
   for (const line of text.split("\n")) assert.ok(line.length <= WIDE, line);
+});
+
+test("renderUsageText fits every width down to a narrow terminal", () => {
+  const view = buildUsageView({
+    branch: emptyUsageSummary(),
+    scan: piScan(),
+    sessionsRoot: SESSIONS_ROOT,
+    opencode: opencodeRead(),
+    quota: { ok: false, reason: "no credentials" },
+    now: NOW,
+  });
+
+  for (const width of [24, 38, 60, 76, 120]) {
+    for (const line of renderUsageText(view, width).split("\n")) {
+      assert.ok(line.length <= width, `${width}: ${line}`);
+    }
+  }
 });

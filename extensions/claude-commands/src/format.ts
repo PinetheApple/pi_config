@@ -1,5 +1,22 @@
 /** Display formatting shared by every claude-commands report. */
 
+import { homedir } from "node:os";
+
+/** Sentinel a usage source writes when a record names no provider or model. */
+export const UNKNOWN_MODEL_FIELD = "unknown";
+
+export function modelLabel(provider: string, model: string) {
+  return provider === UNKNOWN_MODEL_FIELD && model === UNKNOWN_MODEL_FIELD
+    ? "(model not recorded)"
+    : `${provider}/${model}`;
+}
+
+/** Render an absolute path under $HOME as `~/...` so it fits a narrow panel. */
+export function homeRelative(path: string) {
+  const home = homedir();
+  return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
 export function formatTokens(count: number) {
   if (!Number.isFinite(count)) return "?";
   const value = Math.round(count);
