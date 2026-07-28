@@ -1,5 +1,10 @@
 # background-terminals — Implementation Guide
 
+> **Historical note (added after the fact):** `extensions/workflows` was removed from this
+> repo in `ace80b2`. This document is the research-phase record and is left as written, so
+> every `workflows/...` citation below points at code that now only exists in git history —
+> `git show ace80b2^:extensions/workflows/<file>` to read one.
+
 > Research phase output. Updated 2026-07-24 against:
 > - `effect@4.0.0-beta.101` (verified installed in this package's `node_modules/effect`; the
 >   `unstable/process` module exists there but we deliberately do NOT use it — see §6)
@@ -7,10 +12,6 @@
 >   `/Users/davis/.vite-plus/js_runtime/node/24.18.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/`
 > - Reference implementations: `extensions/subagents` (Effect v4 service/manager/read-model/tools)
 >   and `extensions/workflows` (dashboard UI, status line, background completion follow-ups).
->
-> **Historical note:** `extensions/workflows` has since been removed from this repo. This
-> document is a record of the research phase and is left as written; every `workflows/...`
-> citation below refers to code that now only exists in git history.
 >
 > Read alongside `extensions/subagents/docs/effect-v4-notes.md` (API cheat sheet) and
 > `extensions/subagents/docs/effect-v4-extension-guide.md` (toolchain + ManagedRuntime boundary).
