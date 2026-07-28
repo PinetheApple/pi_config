@@ -60,11 +60,21 @@ function statusWord(snap: TerminalSnapshot, theme: Theme) {
 
 // --- Entry point ---------------------------------------------------------------
 
+export interface TerminalPickerOptions {
+  /** Terminal to start on. Falls back to the first row when it is gone. */
+  readonly initialId?: string;
+}
+
 export async function openTerminalPicker(
   ctx: ExtensionCommandContext,
   view: TerminalReadModel,
+  options?: TerminalPickerOptions,
 ) {
   const selection: DashboardSelection = { index: 0 };
+  if (options?.initialId) {
+    selection.id = options.initialId;
+    reconcileDashboardSelection(selection, view.list());
+  }
 
   while (true) {
     if (view.size() === 0) {
