@@ -27,13 +27,14 @@ import {
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
-import type {
-  SpawnTask,
-  SubagentEvent,
-  SubagentMeta,
-  TranscriptPart,
-} from "../domain.ts";
+import type { SpawnTask, SubagentEvent, SubagentMeta } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import {
+  assistantParts,
+  safeJson,
+  toolPreview,
+  userText,
+} from "../message-transcript.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -180,74 +181,6 @@ function finalOutput(session: AgentSession): string {
     if (text) return text;
   }
   return "";
-}
-
-function safeJson(value: unknown): string | undefined {
-  try {
-    const text = JSON.stringify(value);
-    return text === "{}" ? undefined : text.slice(0, 4_096);
-  } catch {
-    return undefined;
-  }
-}
-
-/** First non-empty line of a tool result-ish value (v1 liveToolPreview). */
-function toolPreview(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value
-      .split("\n")
-      .find((line) => line.trim())
-      ?.trim();
-  }
-  if (!value || typeof value !== "object") return undefined;
-  const content = (value as { content?: unknown }).content;
-  if (!Array.isArray(content)) return undefined;
-  for (const part of content) {
-    if (!part || typeof part !== "object") continue;
-    const record = part as { type?: unknown; text?: unknown };
-    if (record.type !== "text" || typeof record.text !== "string") continue;
-    const firstLine = record.text.split("\n").find((line) => line.trim());
-    if (firstLine) return firstLine.trim();
-  }
-  return undefined;
-}
-
-function assistantParts(msg: AssistantMessage): TranscriptPart[] {
-  const parts: TranscriptPart[] = [];
-  for (const part of msg.content) {
-    if (part.type === "text") {
-      parts.push({ type: "text", text: part.text });
-    } else if (part.type === "thinking") {
-      parts.push({
-        type: "thinking",
-        text: part.redacted ? "" : part.thinking,
-        redacted: part.redacted,
-      });
-    } else if (part.type === "toolCall") {
-      parts.push({
-        type: "toolCall",
-        toolId: part.id,
-        name: part.name,
-        argsPreview: safeJson(part.arguments),
-      });
-    }
-  }
-  return parts;
-}
-
-function userText(msg: Message): string {
-  const content = (msg as { content: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter(
-      (part): part is { type: "text"; text: string } =>
-        !!part &&
-        typeof part === "object" &&
-        (part as { type?: unknown }).type === "text",
-    )
-    .map((part) => part.text)
-    .join("\n");
 }
 
 // --- The session ------------------------------------------------------------------

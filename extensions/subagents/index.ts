@@ -20,8 +20,6 @@
  * JSON-RPC to a scoped `codex app-server` process.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
@@ -33,9 +31,7 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
-  getAgentDir,
   getMarkdownTheme,
-  ProjectTrustStore,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
@@ -52,7 +48,11 @@ import {
   formatActivityStatus,
   formatContextUtilization,
 } from "./src/format.ts";
-import { SubagentManager, type SubagentManagerShape } from "./src/manager.ts";
+import {
+  MAX_TRACKED,
+  SubagentManager,
+  type SubagentManagerShape,
+} from "./src/manager.ts";
 import {
   buildSubagentResultMessage,
   buildSubagentSpawnResult,
@@ -68,15 +68,30 @@ import {
   SUBAGENT_WAIT_PARAMETER_DESCRIPTIONS,
   SUBAGENT_WAIT_TOOL_DESCRIPTION,
 } from "./src/prompt.ts";
+import {
+  collectSubagentRecords,
+  createRecordWriter,
+  type SubagentRecord,
+  SUBAGENT_RECORD_TYPE,
+} from "./src/record.ts";
 import { createDeferredResultDelivery } from "./src/result-delivery.ts";
 import {
   createSubagentRuntime,
   runTool,
   type SubagentRuntime,
 } from "./src/runtime.ts";
+import { spawnSubagent } from "./src/spawn.ts";
+import {
+  runSubagentSpawnCommand,
+  SPAWN_COMMAND_USAGE,
+} from "./src/spawn-command.ts";
 import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
+/** Records live in the parent session file forever; keep them small. */
+const RECORD_FINAL_TEXT_MAX_BYTES = 8 * 1024;
+/** Session reasons that can carry subagents spawned before this process. */
+const RESTORING_REASONS = new Set(["startup", "resume", "fork", "reload"]);
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
 const WAIT_PER_AGENT_MAX_BYTES = 16 * 1024;
 
@@ -116,33 +131,18 @@ function truncatedOutput(
   return text;
 }
 
-/**
- * Same-directory children inherit the live parent decision. An alternate cwd
- * is trusted only when pi's persisted trust store explicitly trusts it (or a
- * containing directory); unreadable/invalid trust data fails closed.
- */
-function resolveChildProjectTrust(options: {
-  parentCwd: string;
-  childCwd: string;
-  parentTrusted: boolean;
-}) {
-  if (path.resolve(options.childCwd) === path.resolve(options.parentCwd)) {
-    return options.parentTrusted;
-  }
-  try {
-    const trustStore = new ProjectTrustStore(getAgentDir());
-    return trustStore.get(options.childCwd) === true;
-  } catch {
-    return false;
-  }
-}
-
 export default function (pi: ExtensionAPI) {
   let runtime: SubagentRuntime | undefined;
   let managerPromise: Promise<SubagentManagerShape> | undefined;
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
+  const recordWriter = createRecordWriter({
+    append: (record) =>
+      pi.appendEntry<SubagentRecord>(SUBAGENT_RECORD_TYPE, record),
+    truncateFinalText: (snap) =>
+      truncatedOutput(snap, RECORD_FINAL_TEXT_MAX_BYTES),
+  });
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
 
   const getRuntime = () => (runtime ??= createSubagentRuntime());
@@ -154,7 +154,10 @@ export default function (pi: ExtensionAPI) {
       .then((manager) => {
         manager.view.setOnSettled(onSettled);
         unsubStatus?.();
-        unsubStatus = manager.view.subscribe(() => updateStatus(manager));
+        unsubStatus = manager.view.subscribe(() => {
+          updateStatus(manager);
+          persistRecords(manager);
+        });
         updateStatus(manager);
         return manager;
       });
@@ -175,6 +178,16 @@ export default function (pi: ExtensionAPI) {
       "subagents",
       formatActivityStatus(ui.theme, { running, done, failed }),
     );
+  };
+
+  /**
+   * Mirror live subagents into durable `subagent-record` custom entries so
+   * `/subagents` survives a resume. Custom entries never reach the model, so
+   * this is state, not context.
+   */
+  const persistRecords = (manager: SubagentManagerShape) => {
+    if (!sessionContext) return;
+    recordWriter.write(manager.view.list());
   };
 
   const deliverResult = (snap: SubagentSnapshot) => {
@@ -240,9 +253,38 @@ export default function (pi: ExtensionAPI) {
     if (sessionContext?.isIdle()) flushResults();
   };
 
-  pi.on("session_start", (_event, ctx) => {
+  /**
+   * Rehydrate subagents recorded earlier in this session. Live reattach is
+   * impossible — the children died with the previous process — so adopted
+   * entries are terminal and inert, and are deliberately not routed through
+   * `onSettled`: the parent transcript already holds their original results.
+   */
+  const restoreSubagents = async (ctx: ExtensionContext) => {
+    const records = collectSubagentRecords(
+      // The active branch only: `getEntries()` would resurrect subagents from
+      // branches the user has already forked away from.
+      ctx.sessionManager.getBranch(),
+      MAX_TRACKED,
+    );
+    if (records.length === 0) return;
+    const manager = await getManager();
+    recordWriter.seed(records);
+    await runTool(getRuntime(), manager.adopt(records));
+  };
+
+  pi.on("session_start", async (event, ctx) => {
     sessionContext = ctx;
     if (ctx.hasUI) ui = ctx.ui;
+    if (!RESTORING_REASONS.has(event.reason)) return;
+    try {
+      await restoreSubagents(ctx);
+    } catch (error) {
+      // Restoration is best-effort history; never block session startup.
+      ui?.notify(
+        `Could not restore subagents: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
   });
 
   pi.on("agent_settled", flushResults);
@@ -250,6 +292,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     sessionContext = undefined;
     resultDelivery.clear();
+    recordWriter.clear();
     unsubStatus?.();
     unsubStatus = undefined;
     ui?.setStatus("subagents", undefined);
@@ -300,36 +343,23 @@ export default function (pi: ExtensionAPI) {
       const manager = await getManager();
       const harness = params.harness;
 
-      const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
-      if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-        throw new Error(`working_dir is not a directory: ${cwd}`);
-      }
-
-      const title = params.name.trim().slice(0, 160) || "subagent";
-      const snap = await runTool(
-        getRuntime(),
-        manager.spawn(harness, {
+      const { snapshot: snap, task } = await spawnSubagent({
+        runtime: getRuntime(),
+        manager,
+        harness,
+        request: {
           prompt: params.prompt,
-          title,
-          cwd,
+          title: params.name,
+          workingDir: params.working_dir,
           model: params.model,
           reasoningEffort: params.reasoning_effort,
-          parent: {
-            parentCwd: ctx.cwd,
-            projectTrusted: resolveChildProjectTrust({
-              parentCwd: ctx.cwd,
-              childCwd: cwd,
-              parentTrusted: ctx.isProjectTrusted(),
-            }),
-            inheritedModel: ctx.model
-              ? { provider: ctx.model.provider, id: ctx.model.id }
-              : undefined,
-            inheritedThinkingLevel: pi.getThinkingLevel(),
-            modelRegistry: ctx.modelRegistry,
-          },
-        }),
-        { signal, interruptMessage: "Subagent spawn aborted." },
-      );
+        },
+        ctx,
+        thinkingLevel: pi.getThinkingLevel(),
+        signal,
+        interruptMessage: "Subagent spawn aborted.",
+      });
+      const cwd = task.cwd;
 
       return {
         content: [
@@ -719,6 +749,18 @@ export default function (pi: ExtensionAPI) {
     description:
       "Ask a one-off side question while the main agent keeps working",
     handler: runByTheWay,
+  });
+
+  pi.registerCommand("subagent-spawn", {
+    description: `Spawn a subagent yourself and take it over. ${SPAWN_COMMAND_USAGE}`,
+    handler: async (rawArgs, ctx) =>
+      runSubagentSpawnCommand({
+        rawArgs,
+        ctx,
+        manager: await getManager(),
+        runtime: getRuntime(),
+        thinkingLevel: pi.getThinkingLevel(),
+      }),
   });
 
   pi.registerCommand("subagents", {

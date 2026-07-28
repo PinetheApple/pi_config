@@ -16,6 +16,10 @@ import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
 import { formatContextUtilization } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
+import {
+  loadRestoredTranscript,
+  type RestoredTranscript,
+} from "../restore-transcript.ts";
 import { buildTranscriptLines } from "./transcript.ts";
 
 function configuredKeys(
@@ -203,7 +207,15 @@ class SubagentDashboard implements Component {
     }
     if (data === "x") {
       const snap = subs[this.selection.index];
-      if (snap && snap.status === "running") this.view.requestAbort(snap.id);
+      // Restored entries are terminal history; there is no run to abort.
+      if (snap && snap.status === "running" && !snap.restored) {
+        this.view.requestAbort(snap.id);
+      }
+      return;
+    }
+    if (data === "d") {
+      const snap = subs[this.selection.index];
+      if (snap && snap.status !== "running") this.view.requestForget(snap.id);
       return;
     }
   }
@@ -284,7 +296,7 @@ class SubagentDashboard implements Component {
       truncateToWidth(
         theme.fg(
           "dim",
-          `  ${configuredKeys(this.keybindings, "tui.select.up")}/${configuredKeys(this.keybindings, "tui.select.down")}/jk select · ${configuredKeys(this.keybindings, "tui.select.confirm")} take over · x abort · ${configuredKeys(this.keybindings, "tui.select.cancel")} close`,
+          `  ${configuredKeys(this.keybindings, "tui.select.up")}/${configuredKeys(this.keybindings, "tui.select.down")}/jk select · ${configuredKeys(this.keybindings, "tui.select.confirm")} take over · x abort · d forget (keeps transcript on disk) · ${configuredKeys(this.keybindings, "tui.select.cancel")} close`,
         ),
         width,
       ),
@@ -327,6 +339,7 @@ class SubagentDashboard implements Component {
       const utilization = formatContextUtilization(snap.usage);
       const dot = theme.fg("dim", " · ");
       const rightParts = [
+        ...(snap.restored ? [theme.fg("dim", "restored")] : []),
         theme.fg("muted", snap.backend),
         theme.fg("muted", snap.meta.modelLabel ?? "?"),
         ...(utilization ? [theme.fg("muted", utilization)] : []),
@@ -377,6 +390,12 @@ class TakeoverView implements Component, Focusable {
   private renderTimer?: ReturnType<typeof setTimeout>;
   private ticker: ReturnType<typeof setInterval>;
   private closed = false;
+  /**
+   * Restored subagents have no in-memory transcript; the child's own file is
+   * replayed lazily here, on open, never during session_start.
+   */
+  private restored?: RestoredTranscript;
+  private restoredNote?: string;
 
   private _focused = false;
   get focused(): boolean {
@@ -414,6 +433,28 @@ class TakeoverView implements Component, Focusable {
       this.scrollOffset = 0;
       this.tui.requestRender();
     };
+    if (this.snap()?.restored) this.loadRestoredTranscript();
+  }
+
+  private loadRestoredTranscript() {
+    const snap = this.snap();
+    if (!snap) return;
+    this.restoredNote = "restored · loading transcript…";
+    loadRestoredTranscript(snap).then(
+      (restored) => {
+        if (this.closed) return;
+        this.restored = restored;
+        this.restoredNote = restored.note;
+        this.tui.requestRender();
+      },
+      (error: unknown) => {
+        if (this.closed) return;
+        this.restoredNote = `restored · could not load transcript: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        this.tui.requestRender();
+      },
+    );
   }
 
   private snap(): SubagentSnapshot | undefined {
@@ -487,7 +528,9 @@ class TakeoverView implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    this.input.handleInput(data);
+    // Restored subagents are inert: swallowing keystrokes into a dead input
+    // would look like the child is ignoring the user.
+    if (!this.snap()?.restored) this.input.handleInput(data);
     this.tui.requestRender();
   }
 
@@ -527,15 +570,26 @@ class TakeoverView implements Component, Focusable {
 
     // Fixed-height transcript viewport. Error and scroll status consume rows
     // inside the viewport so streaming/scrolling never changes overlay height.
-    const transcript = buildTranscriptLines(snap, width, theme);
+    const transcript = buildTranscriptLines(
+      this.restored ? { ...snap, transcript: this.restored.items } : snap,
+      width,
+      theme,
+    );
     const viewport = this.viewportHeight();
+    const noteRows = this.restoredNote ? 1 : 0;
     const errorRows = snap.errorText ? 1 : 0;
     const scrollRows = this.scrollOffset > 0 ? 1 : 0;
-    const transcriptCapacity = Math.max(1, viewport - errorRows - scrollRows);
+    const transcriptCapacity = Math.max(
+      1,
+      viewport - noteRows - errorRows - scrollRows,
+    );
     const maxOffset = Math.max(0, transcript.length - transcriptCapacity);
     if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset;
 
     const body: string[] = [];
+    if (this.restoredNote) {
+      body.push(truncateToWidth(theme.fg("dim", this.restoredNote), width));
+    }
     if (snap.errorText) {
       body.push(
         truncateToWidth(theme.fg("error", `error: ${snap.errorText}`), width),
@@ -563,6 +617,28 @@ class TakeoverView implements Component, Focusable {
     lines.push(...body.slice(0, viewport));
 
     lines.push(border);
+    if (snap.restored) {
+      lines.push(
+        truncateToWidth(
+          theme.fg(
+            "muted",
+            "read-only · this subagent ended with an earlier pi run and cannot be steered",
+          ),
+          width,
+        ),
+      );
+      lines.push(
+        truncateToWidth(
+          theme.fg(
+            "dim",
+            `${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
+          ),
+          width,
+        ),
+      );
+      lines.push(border);
+      return lines;
+    }
     lines.push(...this.input.render(width));
     lines.push(
       truncateToWidth(

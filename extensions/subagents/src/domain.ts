@@ -211,6 +211,13 @@ export interface SubagentSnapshot {
   readonly finalText: string;
   /** Count of finalized assistant messages (for subagent_check). */
   readonly turns: number;
+  /**
+   * Rehydrated from a persisted `subagent-record` after a resume/fork/reload.
+   * The child session is gone, so the entry is terminal and inert: it cannot
+   * be steered, aborted, or restarted, and its transcript (when the backend
+   * kept one on disk) is loaded lazily by the UI.
+   */
+  readonly restored?: true;
 }
 
 /** Final text, or the live streaming buffer while a run is active (v1 `latestOutput`). */
