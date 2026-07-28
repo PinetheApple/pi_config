@@ -35,6 +35,20 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export type SubagentStatus = "running" | "done" | "error";
 
+/**
+ * Tools headless children must never receive, whatever an agent definition
+ * asks for: orchestration stays with the parent and children cannot prompt
+ * the user. Everything else stays enabled.
+ */
+export const CHILD_EXCLUDED_TOOL_NAMES = [
+  "subagent_spawn",
+  "subagent_wait",
+  "subagent_cancel",
+  "subagent_check",
+  "subagent_list",
+  "ask_user",
+] as const;
+
 /** Parent-session context resolved by the tool layer and passed opaquely. */
 export interface ParentContext {
   readonly parentCwd: string;
@@ -44,6 +58,21 @@ export interface ParentContext {
   readonly inheritedThinkingLevel?: string;
   /** Parent model registry; required by the pi backend to resolve models. */
   readonly modelRegistry?: ModelRegistry;
+}
+
+/**
+ * An agent definition already projected onto the target harness: `tools` and
+ * `model` are in that harness's own vocabulary, so backends consume them
+ * directly. See `agent-defs.ts` for the translation.
+ */
+export interface AgentSpec {
+  readonly name: string;
+  readonly description: string;
+  readonly systemPrompt: string;
+  /** Allowlist; omitted = the harness default set. */
+  readonly tools?: readonly string[];
+  /** Model hint; omitted = the harness default. */
+  readonly model?: string;
 }
 
 export interface SpawnTask {
@@ -60,6 +89,8 @@ export interface SpawnTask {
   readonly model?: string;
   /** Shared effort scale; each backend maps it to its native equivalent. */
   readonly reasoningEffort?: ReasoningEffort;
+  /** Persona this child runs as: system prompt, tool allowlist, model. */
+  readonly agent?: AgentSpec;
   readonly parent: ParentContext;
 }
 
