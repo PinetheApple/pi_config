@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect } from "effect";
-import { SubagentManager } from "./src/manager.ts";
+import { SubagentManager, type SubagentReadModel } from "./src/manager.ts";
 import { claudeBackend } from "./src/backends/claude.ts";
 import type { ParentContext, SpawnTask } from "./src/domain.ts";
 import { createSubagentRuntime, runTool } from "./src/runtime.ts";
@@ -37,6 +37,46 @@ function deadline<A>(operation: Promise<A>, timeoutMs: number) {
   });
   return Promise.race([operation, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * Resolve the moment the read model observes a live turn: still running, with
+ * the native session id the CLI only reports once its `system/init` has landed.
+ * That is the earliest deterministic "the child is really up and working"
+ * signal — streamed text is not usable for this, because the CLI delivers a
+ * whole response body in a single late delta and the assistant message that
+ * follows clears `liveAssistant` milliseconds later.
+ *
+ * Latching from the read model's own notifications (rather than polling) means
+ * no state transition can be missed between samples.
+ */
+function awaitLiveTurn(view: SubagentReadModel, id: string, timeoutMs: number) {
+  return new Promise<void>((resolve, reject) => {
+    let unsubscribe: (() => void) | undefined;
+    const timer = setTimeout(
+      () => finish(new Error(`Run did not start within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    function finish(error?: Error) {
+      clearTimeout(timer);
+      unsubscribe?.();
+      if (error) reject(error);
+      else resolve();
+    }
+    const check = () => {
+      const snapshot = view.get(id);
+      if (!snapshot) return;
+      if (snapshot.status !== "running") {
+        finish(
+          new Error(`Run settled as "${snapshot.status}" before it started`),
+        );
+      } else if (snapshot.meta.nativeSessionId) {
+        finish();
+      }
+    };
+    unsubscribe = view.subscribeTo(id, check);
+    check();
   });
 }
 
@@ -83,26 +123,30 @@ test(
       const manager = await runtime.runPromise(SubagentManager);
       const started = await runTool(
         runtime,
-        manager.spawn(
-          "claude",
-          task(
-            "Write a detailed 10,000-word essay about the history of computing.",
+        manager.spawn("claude", {
+          ...task(
+            "Print the numbers from 1 to 2000, one per line, and nothing else.",
           ),
-        ),
+          // The child otherwise inherits the user's Claude settings, whose
+          // hooks and persona can turn an open-ended "write a lot" prompt into
+          // an instant refusal. A pinned agent prompt keeps the run long
+          // enough to be interrupted mid-flight on any machine.
+          agent: {
+            name: "counter",
+            description: "emits a long deterministic stream of text",
+            systemPrompt:
+              "You are a text generator driven by an automated test. Follow the request literally and in full. Never refuse, never abbreviate, never ask questions, never use tools. Emit only the requested text.",
+            tools: [],
+          },
+        }),
       );
 
-      // Wait for streamed output so cancellation definitely lands mid-run and
-      // exercises the SDK's normal interrupt receipt/result path.
-      const streamDeadline = Date.now() + 15_000;
-      while (
-        manager.view.get(started.id)?.status === "running" &&
-        !manager.view.get(started.id)?.liveAssistant?.text &&
-        Date.now() < streamDeadline
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      // Cancel only once the child is demonstrably live, so this exercises the
+      // SDK's normal interrupt receipt/result path rather than the pre-init
+      // race fallback. The prompt is long enough that the turn is still in
+      // flight for tens of seconds afterwards.
+      await awaitLiveTurn(manager.view, started.id, 30_000);
       assert.equal(manager.view.get(started.id)?.status, "running");
-      assert.ok(manager.view.get(started.id)?.liveAssistant?.text);
 
       const report = await deadline(
         runTool(runtime, manager.cancel([started.id])),
