@@ -9,6 +9,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { Severity } from "./bar.ts";
+import { layoutTable } from "./table.ts";
 import {
   gaugeLines,
   layoutGauge,
@@ -39,8 +40,16 @@ const SEVERITY_COLORS: Record<Severity, Parameters<Theme["fg"]>[0]> = {
 function styleRow(row: UsageRow, width: number, theme: UsageTheme) {
   if (row.kind === "text") {
     return wrapTextWithAnsi(textRowLine(row), width).map((line) =>
-      theme.fg("text", line),
+      theme.fg(row.dim ? "dim" : "text", line),
     );
+  }
+
+  if (row.kind === "table") {
+    const table = layoutTable(row.spec, width);
+    return [
+      theme.fg("dim", table.head),
+      ...table.rows.map((line) => theme.fg("text", line)),
+    ];
   }
 
   const layout = layoutGauge(row, width);

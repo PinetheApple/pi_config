@@ -8,6 +8,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { UNKNOWN_MODEL_FIELD } from "../format.ts";
 import {
   emptyUsageSummary,
   mergeUsage,
@@ -50,7 +51,10 @@ export interface OpencodeTotals {
   rows: number;
 }
 
-const UNKNOWN: OpencodeModelKey = { provider: "unknown", model: "unknown" };
+const UNKNOWN: OpencodeModelKey = {
+  provider: UNKNOWN_MODEL_FIELD,
+  model: UNKNOWN_MODEL_FIELD,
+};
 
 /** The `model` column is a JSON blob; anything else is bucketed as unknown. */
 export function parseModelColumn(raw: unknown): OpencodeModelKey {

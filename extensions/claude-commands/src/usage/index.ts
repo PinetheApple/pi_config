@@ -1,9 +1,10 @@
 /**
- * `/usage` — three independent sources, rendered into a dismissable overlay
+ * `/usage` — independent local sources, rendered into a dismissable overlay
  * that leaves no transcript residue. Each source degrades to a one-line reason
  * when it is unavailable.
  */
 
+import { dirname } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { fetchClaudeQuota } from "./claude.ts";
 import { OPENCODE_DB_PATH, readOpencodeUsage } from "./opencode.ts";
@@ -16,8 +17,11 @@ const PLAIN_TEXT_WIDTH = 72;
 
 export async function collectUsage(ctx: ExtensionCommandContext) {
   const now = new Date();
+  // The cwd-encoded session dir sits one level under the sessions root; scan
+  // the root so opencode-go turns from other projects are not invisible.
+  const sessionsRoot = dirname(ctx.sessionManager.getSessionDir());
   const [scan, opencode, quota] = await Promise.all([
-    scanSessionDir(ctx.sessionManager.getSessionDir(), now),
+    scanSessionDir(sessionsRoot, now),
     readOpencodeUsage(OPENCODE_DB_PATH, now),
     fetchClaudeQuota({ signal: ctx.signal }),
   ]);
@@ -25,6 +29,7 @@ export async function collectUsage(ctx: ExtensionCommandContext) {
   return buildUsageView({
     branch: summarizeBranch(ctx.sessionManager.getBranch()),
     scan,
+    sessionsRoot,
     opencode,
     quota,
     now,
