@@ -1,5 +1,10 @@
 # background-terminals — Implementation Guide
 
+> **Historical note (added after the fact):** `extensions/workflows` was removed from this
+> repo in `ace80b2`. This document is the research-phase record and is left as written, so
+> every `workflows/...` citation below points at code that now only exists in git history —
+> `git show ace80b2^:extensions/workflows/<file>` to read one.
+
 > Research phase output. Updated 2026-07-24 against:
 > - `effect@4.0.0-beta.101` (verified installed in this package's `node_modules/effect`; the
 >   `unstable/process` module exists there but we deliberately do NOT use it — see §6)

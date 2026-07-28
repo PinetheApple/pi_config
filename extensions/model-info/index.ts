@@ -7,20 +7,13 @@ import {
   MODEL_INFO_CHANNEL,
   REFRESH_CHANNEL,
 } from "../shared/dashboard-state.ts";
+import { sumEntryUsage } from "../shared/usage-totals.ts";
 
 const CHARS_PER_ESTIMATED_TOKEN = 4;
 const LIVE_UPDATE_INTERVAL_MS = 200;
 
 function getSessionCost(ctx: ExtensionContext) {
-  let cost = 0;
-
-  for (const entry of ctx.sessionManager.getBranch()) {
-    if (entry.type === "message" && entry.message.role === "assistant") {
-      cost += entry.message.usage.cost.total;
-    }
-  }
-
-  return cost;
+  return sumEntryUsage(ctx.sessionManager.getBranch()).cost;
 }
 
 function estimateContentTokens(characters: number) {

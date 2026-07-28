@@ -8,69 +8,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Effect, Layer, ManagedRuntime } from "effect";
-import { BackendRegistry, type SubagentBackend } from "./src/backend.ts";
-import { piBackend } from "./src/backends/pi.ts";
-import { makeStubBackend } from "./src/backends/stub.ts";
-import type { BackendName, ParentContext, SpawnTask } from "./src/domain.ts";
-import {
-  SubagentManager,
-  SubagentManagerLive,
-  type SubagentManagerShape,
-} from "./src/manager.ts";
+import { Effect } from "effect";
+import type { SpawnTask } from "./src/domain.ts";
 import { runTool } from "./src/runtime.ts";
-
-const TestRegistryLive = Layer.sync(BackendRegistry, () => {
-  const backends: SubagentBackend[] = [
-    piBackend,
-    makeStubBackend({
-      backend: "claude",
-      defaultModelLabel: "claude/sonnet",
-      contextWindow: 200_000,
-      toolName: "Bash",
-      cadenceMs: 40,
-    }),
-    makeStubBackend({
-      backend: "codex",
-      defaultModelLabel: "codex/gpt-5-codex",
-      contextWindow: 272_000,
-      toolName: "shell",
-      cadenceMs: 30,
-    }),
-  ];
-  return new Map<BackendName, SubagentBackend>(
-    backends.map((backend) => [backend.name, backend]),
-  );
-});
-
-const createTestRuntime = () =>
-  ManagedRuntime.make(
-    SubagentManagerLive.pipe(Layer.provide(TestRegistryLive)),
-  );
-
-const parent: ParentContext = {
-  parentCwd: process.cwd(),
-  projectTrusted: false,
-};
-
-function task(prompt: string): SpawnTask {
-  return { prompt, title: "test", cwd: process.cwd(), parent };
-}
-
-async function withManager(
-  run: (
-    manager: SubagentManagerShape,
-    runtime: ReturnType<typeof createTestRuntime>,
-  ) => Promise<void>,
-) {
-  const runtime = createTestRuntime();
-  try {
-    const manager = await runtime.runPromise(SubagentManager);
-    await run(manager, runtime);
-  } finally {
-    await runtime.dispose();
-  }
-}
+import { task, withManager } from "./test-harness.ts";
 
 test("stub subagent completes and delivers a final result", async () => {
   await withManager(async (manager, runtime) => {
@@ -272,5 +213,48 @@ test("send steers an idle subagent into another turn", async () => {
     const afterSecond = manager.view.get(snap.id);
     assert.equal(afterSecond?.status, "done");
     assert.match(afterSecond?.finalText ?? "", /Second turn/);
+  });
+});
+
+test("requestForget drops a settled subagent but spares a running one", async () => {
+  await withManager(async (manager, runtime) => {
+    const finished = await runTool(
+      runtime,
+      manager.spawn("claude", task("Say hello to the tests")),
+    );
+    await runTool(runtime, manager.waitFor([finished.id]));
+
+    let notified = 0;
+    const unsubscribe = manager.view.subscribe(() => {
+      notified += 1;
+    });
+
+    // Freshly spawned, so still running: forget must refuse it.
+    const running = await runTool(
+      runtime,
+      manager.spawn("claude", task("Long running task")),
+    );
+    assert.equal(running.status, "running");
+    manager.view.requestForget(running.id);
+    assert.ok(manager.view.get(running.id), "a running subagent is kept");
+
+    const beforeSettledForget = notified;
+    manager.view.requestForget(finished.id);
+    assert.equal(manager.view.get(finished.id), undefined);
+    assert.deepEqual(
+      manager.view.list().map((snap) => snap.id),
+      [running.id],
+    );
+    assert.equal(notified, beforeSettledForget + 1);
+
+    manager.view.requestForget(finished.id);
+    assert.equal(
+      notified,
+      beforeSettledForget + 1,
+      "forgetting an unknown id is a no-op",
+    );
+
+    unsubscribe();
+    await runTool(runtime, manager.cancel([running.id]));
   });
 });

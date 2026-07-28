@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
+import { prefixWithSystemPrompt } from "../agent-defs.ts";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type {
   ReasoningEffort,
@@ -927,7 +928,7 @@ const makeCodexSession = (
       );
     }
     emit({ _tag: "MetaChanged", meta: state.meta });
-    startRun(task.prompt);
+    startRun(prefixWithSystemPrompt(task.prompt, task.agent));
 
     return {
       meta: Effect.sync(() => state.meta),
