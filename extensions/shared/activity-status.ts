@@ -10,9 +10,10 @@ interface ActivityCounts {
 
 const SQUARE = "■";
 
+/** `label` doubles as the slash command shown in the hint (e.g. "subagents" -> "/subagents"). */
 export function formatActivityStatus(
   theme: Theme,
-  label: "subagents" | "workflows",
+  label: string,
   counts: ActivityCounts,
 ) {
   const parts: string[] = [];

@@ -52,6 +52,11 @@ import {
   runTool,
   type TerminalRuntime,
 } from "./src/runtime.ts";
+import {
+  runTerminalSpawnCommand,
+  TERMINAL_SPAWN_USAGE,
+} from "./src/spawn-command.ts";
+import { normalizeTerminalTitle } from "./src/title.ts";
 import { sanitizeText } from "./src/ui/output-view.ts";
 import { openTerminalPicker } from "./src/ui/ps.ts";
 
@@ -233,10 +238,7 @@ export default function (pi: ExtensionAPI) {
         throw new Error(`working_dir is not a directory: ${cwd}`);
       }
 
-      // Collapse whitespace (a newline inside a one-line UI row desyncs the
-      // TUI renderer) before bounding the length.
-      const title =
-        params.title.replace(/\s+/g, " ").trim().slice(0, 80) || "terminal";
+      const title = normalizeTerminalTitle(params.title);
       const snap = await runTool(
         getRuntime(),
         manager.start({ command, title, cwd }),
@@ -443,5 +445,16 @@ export default function (pi: ExtensionAPI) {
       }
       await openTerminalPicker(ctx, manager.view);
     },
+  });
+
+  pi.registerCommand("terminal-spawn", {
+    description: `Start a background terminal and open it. ${TERMINAL_SPAWN_USAGE}`,
+    handler: async (rawArgs, ctx) =>
+      runTerminalSpawnCommand({
+        rawArgs,
+        ctx,
+        manager: await getManager(),
+        runtime: getRuntime(),
+      }),
   });
 }

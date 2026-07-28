@@ -26,28 +26,19 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
+import { applyToolDenylist } from "../agent-defs.ts";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
-import type {
-  SpawnTask,
-  SubagentEvent,
-  SubagentMeta,
-  TranscriptPart,
-} from "../domain.ts";
-import { SendError, SpawnError } from "../domain.ts";
+import type { SpawnTask, SubagentEvent, SubagentMeta } from "../domain.ts";
+import { CHILD_EXCLUDED_TOOL_NAMES, SendError, SpawnError } from "../domain.ts";
+import {
+  assistantParts,
+  safeJson,
+  toolPreview,
+  userText,
+} from "../message-transcript.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
-
-/** Tools that headless children must not receive. Everything else stays enabled. */
-const CHILD_EXCLUDED_TOOL_NAMES = [
-  "subagent_spawn",
-  "subagent_wait",
-  "subagent_cancel",
-  "subagent_check",
-  "subagent_list",
-  "workflow",
-  "ask_user",
-] as const;
 
 // --- Model + effort resolution -----------------------------------------------
 
@@ -95,12 +86,21 @@ function resolvePiModel(
 // --- Child session helpers (ported from v1 shared/child-session.ts) -----------
 
 /** Load normal global/package resources and trust-gated project resources. */
-async function createChildResources(cwd: string, projectTrusted: boolean) {
+async function createChildResources(
+  cwd: string,
+  projectTrusted: boolean,
+  systemPrompt: string | undefined,
+) {
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir, {
     projectTrusted,
   });
-  const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    ...(systemPrompt ? { systemPrompt } : {}),
+  });
   await loader.reload();
   return { loader, settingsManager };
 }
@@ -182,74 +182,6 @@ function finalOutput(session: AgentSession): string {
   return "";
 }
 
-function safeJson(value: unknown): string | undefined {
-  try {
-    const text = JSON.stringify(value);
-    return text === "{}" ? undefined : text.slice(0, 4_096);
-  } catch {
-    return undefined;
-  }
-}
-
-/** First non-empty line of a tool result-ish value (v1 liveToolPreview). */
-function toolPreview(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value
-      .split("\n")
-      .find((line) => line.trim())
-      ?.trim();
-  }
-  if (!value || typeof value !== "object") return undefined;
-  const content = (value as { content?: unknown }).content;
-  if (!Array.isArray(content)) return undefined;
-  for (const part of content) {
-    if (!part || typeof part !== "object") continue;
-    const record = part as { type?: unknown; text?: unknown };
-    if (record.type !== "text" || typeof record.text !== "string") continue;
-    const firstLine = record.text.split("\n").find((line) => line.trim());
-    if (firstLine) return firstLine.trim();
-  }
-  return undefined;
-}
-
-function assistantParts(msg: AssistantMessage): TranscriptPart[] {
-  const parts: TranscriptPart[] = [];
-  for (const part of msg.content) {
-    if (part.type === "text") {
-      parts.push({ type: "text", text: part.text });
-    } else if (part.type === "thinking") {
-      parts.push({
-        type: "thinking",
-        text: part.redacted ? "" : part.thinking,
-        redacted: part.redacted,
-      });
-    } else if (part.type === "toolCall") {
-      parts.push({
-        type: "toolCall",
-        toolId: part.id,
-        name: part.name,
-        argsPreview: safeJson(part.arguments),
-      });
-    }
-  }
-  return parts;
-}
-
-function userText(msg: Message): string {
-  const content = (msg as { content: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter(
-      (part): part is { type: "text"; text: string } =>
-        !!part &&
-        typeof part === "object" &&
-        (part as { type?: unknown }).type === "text",
-    )
-    .map((part) => part.text)
-    .join("\n");
-}
-
 // --- The session ------------------------------------------------------------------
 
 function boundedError(error: unknown) {
@@ -284,6 +216,11 @@ const makePiSession = (
         const { loader, settingsManager } = await createChildResources(
           task.cwd,
           task.parent.projectTrusted,
+          task.agent?.systemPrompt,
+        );
+        const allowedTools = applyToolDenylist(
+          task.agent?.tools,
+          CHILD_EXCLUDED_TOOL_NAMES,
         );
         const { session } = await createAgentSession({
           cwd: task.cwd,
@@ -292,6 +229,7 @@ const makePiSession = (
           resourceLoader: loader,
           model,
           thinkingLevel,
+          ...(allowedTools ? { tools: allowedTools } : {}),
           excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
         });
         // Start child extension session hooks/resources in headless mode.

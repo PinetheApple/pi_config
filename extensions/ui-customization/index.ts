@@ -20,6 +20,7 @@ import {
   isGitInfoState,
   isModelInfoState,
 } from "../shared/dashboard-state.ts";
+import { composeStatusLine, STATUS_ELLIPSIS } from "./src/status-line.ts";
 
 type Rgb = [number, number, number];
 interface RenderableNode {
@@ -282,16 +283,12 @@ export default function uiCustomization(pi: ExtensionAPI) {
             columns(theme.fg("muted", usage), theme.fg("muted", git), width),
           ];
 
-          // Extension statuses render after the two dashboard lines, one per row.
-          const statuses = footerData.getExtensionStatuses();
-          const statusLines = Array.from(statuses.entries())
-            .sort(([a], [b]) => a.localeCompare(b))
-            .flatMap(([, text]) => text.split("\n"));
-          for (const statusLine of statusLines) {
-            lines.push(
-              truncateToWidth(statusLine, width, theme.fg("dim", "...")),
-            );
-          }
+          const statusLine = composeStatusLine(
+            footerData.getExtensionStatuses(),
+            width,
+            theme.fg("dim", STATUS_ELLIPSIS),
+          );
+          if (statusLine) lines.push(statusLine);
 
           return lines;
         },
