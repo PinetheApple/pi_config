@@ -11,6 +11,12 @@ import {
   serializeRunTranscript,
 } from "./src/transcript.ts";
 import {
+  formatSummaryState,
+  parseToggleArguments,
+  report,
+  resolveEnabled,
+} from "./src/toggle.ts";
+import {
   openModelPicker,
   openReasoningPicker,
   renderRecap,
@@ -55,6 +61,16 @@ export default function (pi: ExtensionAPI) {
     );
   };
 
+  const cancelActiveSummaries = async () => {
+    const summaries = [...activeSummaries.entries()];
+    for (const [controller] of summaries) controller.abort();
+    await waitForCancellation(
+      summaries.map(([, task]) => task),
+      SHUTDOWN_WAIT_MS,
+    );
+    activeSummaries.clear();
+  };
+
   pi.registerEntryRenderer<RecapEntryData>(
     RECAP_ENTRY_TYPE,
     (entry, { expanded }, theme) => renderRecap(entry.data, expanded, theme),
@@ -75,13 +91,20 @@ export default function (pi: ExtensionAPI) {
     const run = runBoundary.settle();
     if (!run || ctx.mode !== "tui" || !sessionActive) return;
 
+    const config = loadSummaryConfig();
+    if (!config.enabled) return;
+
     const entries = getRunEntries(
       ctx.sessionManager.getBranch(),
       run.baselineLeafId,
     );
     if (entries.length === 0) return;
 
-    const config = loadSummaryConfig();
+    const source = {
+      provider: config.provider,
+      model: config.model,
+      reasoning: config.reasoning,
+    };
     const controller = new AbortController();
     statusContext = ctx;
     const task = (async () => {
@@ -93,12 +116,12 @@ export default function (pi: ExtensionAPI) {
           transcript: serializeRunTranscript(entries),
           signal: controller.signal,
         });
-        recap = { ...generated, ...config };
+        recap = { ...generated, ...source };
       } catch (error) {
         if (controller.signal.aborted || !sessionActive) return;
         recap = {
           ...buildFallbackRecap(entries),
-          ...config,
+          ...source,
           fallback: true,
         };
         const detail = error instanceof Error ? ` ${error.message}` : "";
@@ -125,13 +148,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     sessionActive = false;
     runBoundary.reset();
-    const summaries = [...activeSummaries.entries()];
-    for (const [controller] of summaries) controller.abort();
-    await waitForCancellation(
-      summaries.map(([, task]) => task),
-      SHUTDOWN_WAIT_MS,
-    );
-    activeSummaries.clear();
+    await cancelActiveSummaries();
     statusContext?.ui.setStatus(STATUS_KEY, undefined);
     statusContext = undefined;
   });
@@ -161,6 +178,7 @@ export default function (pi: ExtensionAPI) {
       if (!reasoning) return;
 
       const config = {
+        ...current,
         provider: model.provider,
         model: model.id,
         reasoning,
@@ -179,6 +197,43 @@ export default function (pi: ExtensionAPI) {
         `Summary model: ${config.provider}/${config.model} · ${config.reasoning}`,
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("summaries", {
+    description: "Turn run recaps on or off (on | off | status | toggle)",
+    handler: async (args, ctx) => {
+      const parsed = parseToggleArguments(args);
+      if (!parsed.ok) {
+        report(ctx, parsed.error, true);
+        return;
+      }
+
+      // Config lives on disk, so a failed write leaves nothing stale in memory.
+      const current = loadSummaryConfig();
+      const enabled = resolveEnabled(parsed.action, current.enabled);
+      if (enabled === current.enabled) {
+        report(ctx, formatSummaryState(current));
+        return;
+      }
+
+      const next = { ...current, enabled };
+      try {
+        await saveSummaryConfig(next);
+      } catch {
+        report(
+          ctx,
+          `Could not save the private summary config; summaries stay ${current.enabled ? "on" : "off"}.`,
+          true,
+        );
+        return;
+      }
+
+      if (!enabled) {
+        await cancelActiveSummaries();
+        updateStatus();
+      }
+      report(ctx, formatSummaryState(next));
     },
   });
 }

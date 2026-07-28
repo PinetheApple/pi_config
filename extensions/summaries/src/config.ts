@@ -22,16 +22,25 @@ export const REASONING_LEVELS = [
 
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
-export interface SummaryConfig {
+export interface SummaryModelConfig {
   readonly provider: string;
   readonly model: string;
   readonly reasoning: ReasoningLevel;
 }
 
-export const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
+export interface SummaryConfig extends SummaryModelConfig {
+  readonly enabled: boolean;
+}
+
+export const DEFAULT_SUMMARY_MODEL_CONFIG: SummaryModelConfig = {
   provider: "openai-codex",
   model: "gpt-5.6-luna",
   reasoning: "medium",
+};
+
+export const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
+  ...DEFAULT_SUMMARY_MODEL_CONFIG,
+  enabled: true,
 };
 
 const extensionDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -47,9 +56,7 @@ const isReasoningLevel = (value: unknown): value is ReasoningLevel =>
   typeof value === "string" &&
   REASONING_LEVELS.includes(value as ReasoningLevel);
 
-export function parseSummaryConfig(value: unknown) {
-  if (!isRecord(value)) return DEFAULT_SUMMARY_CONFIG;
-
+function parseModelConfig(value: Record<string, unknown>) {
   if (
     typeof value.provider !== "string" ||
     !value.provider.trim() ||
@@ -57,13 +64,27 @@ export function parseSummaryConfig(value: unknown) {
     !value.model.trim() ||
     !isReasoningLevel(value.reasoning)
   ) {
-    return DEFAULT_SUMMARY_CONFIG;
+    return DEFAULT_SUMMARY_MODEL_CONFIG;
   }
 
   return {
     provider: value.provider.trim(),
     model: value.model.trim(),
     reasoning: value.reasoning,
+  } satisfies SummaryModelConfig;
+}
+
+export function parseSummaryConfig(value: unknown) {
+  if (!isRecord(value)) return DEFAULT_SUMMARY_CONFIG;
+
+  // `enabled` is additive: configs written before the toggle existed, and
+  // corrupted values, both mean "on" and must not discard the saved model.
+  return {
+    ...parseModelConfig(value),
+    enabled:
+      typeof value.enabled === "boolean"
+        ? value.enabled
+        : DEFAULT_SUMMARY_CONFIG.enabled,
   } satisfies SummaryConfig;
 }
 

@@ -346,6 +346,22 @@ const makeClaudeSession = (
               ? { pathToClaudeCodeExecutable: claudeBinary }
               : {}),
             ...(task.model ? { model: task.model } : {}),
+            // Claude Code speaks this vocabulary natively: naming the agent
+            // for the main thread applies its prompt, tools, and model there.
+            ...(task.agent
+              ? {
+                  agent: task.agent.name,
+                  agents: {
+                    [task.agent.name]: {
+                      description: task.agent.description,
+                      prompt: task.agent.systemPrompt,
+                      ...(task.agent.tools
+                        ? { tools: [...task.agent.tools] }
+                        : {}),
+                    },
+                  },
+                }
+              : {}),
             ...(thinkingBudget !== undefined
               ? { maxThinkingTokens: thinkingBudget }
               : {}),

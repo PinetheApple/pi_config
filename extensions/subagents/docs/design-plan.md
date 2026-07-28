@@ -8,6 +8,13 @@ unified behind a single Effect v4 service interface.
 > **Status:** this document describes the original v1 plan (stubbed backends). All
 > three backends are now REAL implementations — see `src/backends/{pi,claude,codex}.ts`.
 > The stub machinery survives in `src/backends/stub.ts` for the manager test registry.
+>
+> Two things landed after this plan was written and are not described anywhere below:
+> the spawn path was factored out into `src/spawn.ts` / `src/spawn-command.ts` (the
+> `/subagent-spawn` command and the `subagent_spawn` tool now share one validation path),
+> and `src/agent-defs.ts` added spawnable agent definitions read from
+> `~/.config/ai/agents/*.md`. The file tree in §4 predates both. Read the source, and
+> `skills/subagents/SKILL.md` for the agent-definition semantics.
 
 **Scope of the first version:** interface design + stubbed backend internals + the v1 UI
 carried over. No real Claude/Codex process integration yet; the pi backend may also stay
@@ -48,8 +55,8 @@ the concurrency cap, and that children can't orchestrate/see the parent conversa
 - Children are **in-process pi `AgentSession`s** created via the SDK
   (`createAgentSession` + `SessionManager.create(cwd)` → real session files visible in
   `/resume`), with child resources loaded per-cwd (`DefaultResourceLoader`, trust-gated
-  project resources) and a tool denylist (`excludeTools`: the subagent_* tools,
-  `workflow`, `ask_user`).
+  project resources) and a tool denylist (`excludeTools`: the subagent_* tools and
+  `ask_user`).
 - Settlement is driven by session lifecycle events (`agent_start` re-marks running;
   `agent_settled` settles). Failure detection: thrown prompt error, last assistant
   `stopReason === "error" | "aborted"`, error text bounded to 4096 chars.
