@@ -36,9 +36,9 @@ export type QuotaKey = (typeof QUOTA_KEYS)[number];
 
 export const QUOTA_LABELS: Record<QuotaKey, string> = {
   five_hour: "Current session (5h)",
-  seven_day: "Weekly (all models)",
-  seven_day_opus: "Weekly (Opus)",
-  seven_day_sonnet: "Weekly (Sonnet)",
+  seven_day: "Current week (all models)",
+  seven_day_opus: "Current week (Opus)",
+  seven_day_sonnet: "Current week (Sonnet)",
   extra_usage: "Extra usage",
 };
 

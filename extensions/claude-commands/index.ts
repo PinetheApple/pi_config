@@ -1,21 +1,19 @@
 /**
  * Claude-Code-parity slash commands for pi.
  *
- * Only commands pi does not already ship are registered here. Output is
- * delivered as `claude-commands-report` custom entries, which are persisted in
- * the session but never enter LLM context.
+ * Only commands pi does not already ship are registered here. `/help`,
+ * `/context` and `/status` deliver `claude-commands-report` custom entries,
+ * which are persisted in the session but never enter LLM context. `/usage`
+ * opens a dismissable overlay and persists nothing.
  */
 
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAliases } from "./src/aliases.ts";
 import { buildContextReport } from "./src/context.ts";
 import { buildHelpReport } from "./src/help.ts";
 import { buildStatusReport } from "./src/status.ts";
 import { present, registerReportRenderer } from "./src/ui.ts";
-import { buildUsageReport } from "./src/usage/index.ts";
+import { showUsage } from "./src/usage/index.ts";
 
 export default function (pi: ExtensionAPI) {
   registerReportRenderer(pi);
@@ -54,18 +52,11 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  const usageHandler = async (_args: string, ctx: ExtensionCommandContext) => {
-    present(pi, ctx, await buildUsageReport(ctx));
-  };
-
   pi.registerCommand("usage", {
     description:
       "Show token usage and plan quota across pi, opencode and Claude Code",
-    handler: usageHandler,
-  });
-
-  pi.registerCommand("cost", {
-    description: "Show token usage and cost (alias for /usage)",
-    handler: usageHandler,
+    handler: async (_args, ctx) => {
+      await showUsage(ctx);
+    },
   });
 }
