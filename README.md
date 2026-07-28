@@ -3,7 +3,6 @@
 This setup is fairly opinionated, it:
 
 - sets up github dark default as the theme
-- adds firecrawl tools for searching and scraping
 - updates the bottom bar to have the info I prefer to see
 - adds background terminals + ui to manage them
 - adds subagents to pi
