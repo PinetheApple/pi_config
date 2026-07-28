@@ -14,6 +14,14 @@ import { join } from "node:path";
 
 export const CLAUDE_CONFIG_PATH = join(homedir(), ".claude.json");
 
+export const OPENCODE_DB_PATH = join(
+  homedir(),
+  ".local",
+  "share",
+  "opencode",
+  "opencode.db",
+);
+
 export interface ClaudeAccount {
   email?: string;
   displayName?: string;

@@ -1,10 +1,13 @@
 /** `/status` — environment, session and auth state. */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { readClaudeAccount, readOpencodeAccountEmail } from "./accounts.ts";
+import {
+  OPENCODE_DB_PATH,
+  readClaudeAccount,
+  readOpencodeAccountEmail,
+} from "./accounts.ts";
 import { pad } from "./format.ts";
 import { report, type ReportSection } from "./report.ts";
-import { OPENCODE_DB_PATH } from "./usage/opencode.ts";
 
 const LABEL_WIDTH = 20;
 

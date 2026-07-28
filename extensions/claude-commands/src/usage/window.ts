@@ -1,9 +1,10 @@
 /** Time-window bucketing shared by every /usage source. */
 
-export type UsageWindow = "all" | "today" | "7d" | "30d";
+export type UsageWindow = "all" | "5h" | "today" | "7d" | "30d";
 
 export const USAGE_WINDOWS: readonly UsageWindow[] = [
   "all",
+  "5h",
   "today",
   "7d",
   "30d",
@@ -11,18 +12,22 @@ export const USAGE_WINDOWS: readonly UsageWindow[] = [
 
 export const WINDOW_LABELS: Record<UsageWindow, string> = {
   all: "all time",
+  "5h": "last 5 hours",
   today: "today",
   "7d": "last 7 days",
   "30d": "last 30 days",
 };
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 /** Inclusive lower bound (epoch ms) for a window; -Infinity means unbounded. */
 export function windowStart(window: UsageWindow, now: Date) {
   switch (window) {
     case "all":
       return Number.NEGATIVE_INFINITY;
+    case "5h":
+      return now.getTime() - 5 * HOUR_MS;
     case "today":
       return new Date(
         now.getFullYear(),

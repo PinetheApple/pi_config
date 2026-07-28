@@ -23,7 +23,7 @@ import {
   SEVERITY_MARKERS,
   type Severity,
 } from "./bar.ts";
-import { OPENCODE_DB_PATH, type OpencodeRead } from "./opencode.ts";
+import { GO_LIMITS_DOC, goLimitGauges } from "./go-limits.ts";
 import { sumModelWindows, type ModelBucket, type SessionScan } from "./pi.ts";
 import {
   breakdownRows,
@@ -48,10 +48,7 @@ export const TEXT_LABEL_WIDTH = 16;
 /** pi providers billed by opencode Zen: "opencode" and "opencode-go". */
 const OPENCODE_PROVIDER_PREFIX = "opencode";
 
-export const OPENCODE_QUOTA_NOTE = "not published by opencode Zen";
-export const OPENCODE_APP_HEADING = "opencode app";
-export const OPENCODE_VIA_PI_HEADING = "opencode via pi";
-export const OPENCODE_DB_SOURCE = homeRelative(OPENCODE_DB_PATH);
+export const OPENCODE_HEADING = "opencode";
 
 export interface GaugeLayout {
   label: string;
@@ -133,18 +130,14 @@ export function isOpencodeProvider(provider: string) {
   );
 }
 
-/** opencode-billed turns pi ran itself — the only place opencode-go usage exists. */
-export function buildOpencodeViaPiSection(
+/** opencode-billed turns pi ran itself — the only place opencode usage exists. */
+export function buildOpencodeSection(
   scan: SessionScan | undefined,
   sessionsRoot: string,
 ): UsageSection {
-  const heading = OPENCODE_VIA_PI_HEADING;
+  const heading = OPENCODE_HEADING;
   const rows: UsageRow[] = [
-    sourceRow(
-      homeRelative(sessionsRoot),
-      "turns pi ran through an opencode provider (a subset of the pi section)",
-    ),
-    { kind: "text", label: "Plan quota", value: OPENCODE_QUOTA_NOTE },
+    sourceRow(homeRelative(sessionsRoot), "a subset of the pi section"),
   ];
 
   if (!scan) {
@@ -158,6 +151,7 @@ export function buildOpencodeViaPiSection(
   const windows = sumModelWindows(models);
 
   rows.push(
+    ...goLimitGauges(models),
     ...windowRows(
       (window) => ({
         label: WINDOW_LABELS[window],
@@ -174,45 +168,6 @@ export function buildOpencodeViaPiSection(
       })),
       windows.all.totalTokens,
       "replies",
-    ),
-  );
-
-  return { heading, rows };
-}
-
-/** Sessions run in the opencode app itself; pi never writes to this database. */
-export function buildOpencodeAppSection(result: OpencodeRead): UsageSection {
-  const heading = OPENCODE_APP_HEADING;
-  const rows: UsageRow[] = [
-    sourceRow(
-      OPENCODE_DB_SOURCE,
-      "sessions run in the opencode app, not through pi",
-    ),
-  ];
-
-  if (!result.ok) {
-    rows.push({ kind: "text", value: `unavailable — ${result.reason}` });
-    return { heading, rows };
-  }
-
-  const { windows, byModel } = result.totals;
-  rows.push(
-    ...windowRows(
-      (window) => ({
-        label: WINDOW_LABELS[window],
-        usage: windows[window].usage,
-        count: windows[window].sessions,
-      }),
-      "sessions",
-    ),
-    ...breakdownRows(
-      byModel.map((bucket) => ({
-        label: modelLabel(bucket.provider, bucket.model),
-        usage: bucket.usage,
-        count: bucket.sessions,
-      })),
-      windows.all.usage.totalTokens,
-      "sessions",
     ),
   );
 
@@ -262,7 +217,6 @@ export interface UsageSources {
   branch: UsageSummary;
   scan: SessionScan | undefined;
   sessionsRoot: string;
-  opencode: OpencodeRead;
   quota: ClaudeQuota;
   now: Date;
 }
@@ -272,12 +226,10 @@ export function buildUsageView(sources: UsageSources): UsageView {
     title: "Usage",
     sections: [
       buildClaudeSection(sources.quota, sources.now),
-      buildOpencodeViaPiSection(sources.scan, sources.sessionsRoot),
-      buildOpencodeAppSection(sources.opencode),
+      buildOpencodeSection(sources.scan, sources.sessionsRoot),
       buildPiSection(sources.branch, sources.scan, sources.sessionsRoot),
     ],
-    footer:
-      "Every section names the local file it was read from. Bars mean consumption of a published limit, so only the Claude Code plan has them. Claude Code figures come from an undocumented OAuth endpoint that may change or disappear without notice.",
+    footer: `Every section names the local file it was read from. Bars mean consumption of a published limit. Claude Code figures come from an undocumented OAuth endpoint that may change or disappear without notice. opencode publishes no usage endpoint, so the Go bars divide the cost pi recorded locally by the limits at ${GO_LIMITS_DOC} — they count pi's own turns only, and credit-billed opencode models have no limit to divide by.`,
   };
 }
 
