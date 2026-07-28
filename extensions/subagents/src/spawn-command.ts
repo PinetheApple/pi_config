@@ -3,14 +3,15 @@
  * the model to call `subagent_spawn`.
  *
  * Two surfaces over one spawn path (`./spawn.ts`):
- * - flags: `/subagent-spawn --harness pi --model <id> --effort high
- *   --dir <path> --name <title> <prompt text>`
+ * - flags: `/subagent-spawn --agent <name> --harness pi --model <id>
+ *   --effort high --dir <path> --name <title> <prompt text>`
  * - wizard: anything a partial invocation left out is asked for, in order,
  *   through the TUI dialogs. Escape at any step aborts without spawning.
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { parseLeadingFlags } from "../../shared/flag-args.ts";
+import type { AgentDefinition } from "./agent-defs.ts";
 import {
   BACKEND_NAMES,
   type BackendName,
@@ -24,6 +25,7 @@ import type { SubagentRuntime } from "./runtime.ts";
 import { openSubagentTakeover } from "./ui/takeover.ts";
 
 export const SPAWN_COMMAND_FLAGS = [
+  "--agent",
   "--harness",
   "--model",
   "--effort",
@@ -32,7 +34,7 @@ export const SPAWN_COMMAND_FLAGS = [
 ] as const;
 
 export const SPAWN_COMMAND_USAGE =
-  "/subagent-spawn [--harness pi|claude|codex] [--model <id>] [--effort <level>] [--dir <path>] [--name <title>] <prompt>";
+  "/subagent-spawn [--agent <name>] [--harness pi|claude|codex] [--model <id>] [--effort <level>] [--dir <path>] [--name <title>] <prompt>";
 
 const DEFAULT_HARNESS: BackendName = "pi";
 const WIZARD_TITLE_MAX_LENGTH = 60;
@@ -40,6 +42,7 @@ const WIZARD_TITLE_MAX_LENGTH = 60;
 const INHERIT_CHOICE = "inherit from this session";
 
 export interface ParsedSpawnCommand {
+  readonly agent?: string;
   readonly harness?: BackendName;
   readonly model?: string;
   readonly effort?: ReasoningEffort;
@@ -87,6 +90,7 @@ export function parseSpawnCommandArgs(raw: string): SpawnCommandParseResult {
   return {
     ok: true,
     value: {
+      agent: parsed.flags.get("--agent"),
       harness,
       model: parsed.flags.get("--model"),
       effort,
@@ -106,6 +110,7 @@ export function deriveSpawnTitle(prompt: string) {
 }
 
 interface ResolvedSpawnCommand {
+  readonly agent?: string;
   readonly harness: BackendName;
   readonly prompt: string;
   readonly title: string;
@@ -120,6 +125,7 @@ function resolveWithDefaults(
 ): ResolvedSpawnCommand | undefined {
   if (!parsed.prompt) return undefined;
   return {
+    agent: parsed.agent,
     harness: parsed.harness ?? DEFAULT_HARNESS,
     prompt: parsed.prompt,
     title: parsed.name ?? deriveSpawnTitle(parsed.prompt),
@@ -178,7 +184,15 @@ async function runWizard(
     title = entered.trim() || deriveSpawnTitle(prompt);
   }
 
-  return { harness, prompt, title, model, effort, dir: parsed.dir };
+  return {
+    agent: parsed.agent,
+    harness,
+    prompt,
+    title,
+    model,
+    effort,
+    dir: parsed.dir,
+  };
 }
 
 /**
@@ -223,6 +237,7 @@ export async function runSubagentSpawnCommand(options: {
   readonly manager: SubagentManagerShape;
   readonly runtime: SubagentRuntime;
   readonly thinkingLevel: string | undefined;
+  readonly agentDefinitions?: readonly AgentDefinition[];
 }) {
   const { ctx, manager } = options;
   const parsed = parseSpawnCommandArgs(options.rawArgs);
@@ -257,6 +272,8 @@ export async function runSubagentSpawnCommand(options: {
         model: resolved.model,
         reasoningEffort: resolved.effort,
       },
+      agentName: resolved.agent,
+      agentDefinitions: options.agentDefinitions,
       ctx,
       thinkingLevel: options.thinkingLevel,
     });

@@ -44,9 +44,10 @@ function parentContext(cwd: string) {
 test("the full flag form parses into an explicit config", () => {
   assert.deepEqual(
     parsed(
-      "--harness codex --model gpt-5-codex --effort high --dir ./src --name 'Audit auth' review the login flow",
+      "--agent researcher --harness codex --model gpt-5-codex --effort high --dir ./src --name 'Audit auth' review the login flow",
     ),
     {
+      agent: "researcher",
       harness: "codex",
       model: "gpt-5-codex",
       effort: "high",
@@ -65,6 +66,7 @@ test("the prompt keeps its spacing and any flag-looking text inside it", () => {
   assert.equal(parsed("").prompt, undefined);
   assert.equal(parsed("   ").prompt, undefined);
   assert.deepEqual(parsed("just a prompt"), {
+    agent: undefined,
     harness: undefined,
     model: undefined,
     effort: undefined,
@@ -82,7 +84,7 @@ test("quoted flag values survive as one argument", () => {
 });
 
 test("bad flags are reported by name and never silently ignored", () => {
-  assert.match(parseError("--agent pi hello"), /Unknown flag "--agent"/);
+  assert.match(parseError("--persona pi hello"), /Unknown flag "--persona"/);
   assert.match(parseError("--model"), /Flag "--model" needs a value/);
   assert.match(
     parseError("--harness gemini hello"),

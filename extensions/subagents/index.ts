@@ -11,7 +11,8 @@
  * - subagent_list: list all subagents.
  *
  * Unawaited subagents queue their result as a follow-up message when they
- * settle. `/subagents` opens a picker + full interactive takeover view.
+ * settle. `/subagents` opens a picker + full interactive takeover view, and
+ * lists the agent definitions discovered under `~/.config/ai/agents`.
  *
  * Architecture: Effect v4 generators throughout (backends -> manager ->
  * runtime); this file is the async boundary where tool handlers run effects
@@ -36,6 +37,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { formatAgentCatalog, loadAgentDefinitions } from "./src/agent-defs.ts";
 import { deriveBtwTitle, isModelVisible } from "./src/by-the-way.ts";
 import {
   BACKEND_NAMES,
@@ -56,6 +58,7 @@ import {
 import {
   buildSubagentResultMessage,
   buildSubagentSpawnResult,
+  buildSubagentSpawnToolDescription,
   SUBAGENT_CANCEL_PARAMETER_DESCRIPTIONS,
   SUBAGENT_CANCEL_TOOL_DESCRIPTION,
   SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS,
@@ -137,6 +140,17 @@ export default function (pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
+  // Read once: the tool schema below bakes the agent names in, so picking up
+  // an edited definition needs a /reload anyway.
+  const agentDefinitions = loadAgentDefinitions();
+  const agentNames = agentDefinitions.map((def) => def.name);
+  const agentDescription = {
+    description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.agent,
+  };
+  const agentParameter =
+    agentNames.length > 0
+      ? StringEnum(agentNames, agentDescription)
+      : Type.String(agentDescription);
   const recordWriter = createRecordWriter({
     append: (record) =>
       pi.appendEntry<SubagentRecord>(SUBAGENT_RECORD_TYPE, record),
@@ -310,7 +324,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent_spawn",
     label: "Spawn Subagent",
-    description: SUBAGENT_SPAWN_TOOL_DESCRIPTION,
+    description: buildSubagentSpawnToolDescription(
+      formatAgentCatalog(agentDefinitions),
+    ),
     promptSnippet: SUBAGENT_SPAWN_PROMPT_SNIPPET,
     promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
     parameters: Type.Object({
@@ -320,6 +336,7 @@ export default function (pi: ExtensionAPI) {
       name: Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
       }),
+      agent: Type.Optional(agentParameter),
       harness: StringEnum(BACKEND_NAMES, {
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
       }),
@@ -343,7 +360,11 @@ export default function (pi: ExtensionAPI) {
       const manager = await getManager();
       const harness = params.harness;
 
-      const { snapshot: snap, task } = await spawnSubagent({
+      const {
+        snapshot: snap,
+        task,
+        warnings,
+      } = await spawnSubagent({
         runtime: getRuntime(),
         manager,
         harness,
@@ -354,12 +375,15 @@ export default function (pi: ExtensionAPI) {
           model: params.model,
           reasoningEffort: params.reasoning_effort,
         },
+        agentName: params.agent,
+        agentDefinitions,
         ctx,
         thinkingLevel: pi.getThinkingLevel(),
         signal,
         interruptMessage: "Subagent spawn aborted.",
       });
       const cwd = task.cwd;
+      for (const warning of warnings) ui?.notify(warning, "warning");
 
       return {
         content: [
@@ -371,6 +395,8 @@ export default function (pi: ExtensionAPI) {
               harness,
               modelLabel: snap.meta.modelLabel ?? "?",
               cwd,
+              agent: params.agent,
+              warnings,
             }),
           },
         ],
@@ -379,6 +405,7 @@ export default function (pi: ExtensionAPI) {
           title: snap.title,
           cwd,
           harness,
+          agent: params.agent,
           model: snap.meta.modelLabel,
         },
       };
@@ -760,24 +787,29 @@ export default function (pi: ExtensionAPI) {
         manager: await getManager(),
         runtime: getRuntime(),
         thinkingLevel: pi.getThinkingLevel(),
+        agentDefinitions,
       }),
   });
 
   pi.registerCommand("subagents", {
     description: "List, inspect, and take over subagents",
     handler: async (_args, ctx) => {
+      const catalog = formatAgentCatalog(agentDefinitions);
+      const available = catalog
+        ? `\n\nAvailable agents:\n${catalog}`
+        : "\n\nNo agent definitions found.";
       if (ctx.mode !== "tui") {
         if (ctx.hasUI)
           ctx.ui.notify(
-            "Subagent takeover is only available in the TUI",
-            "error",
+            `Subagent takeover is only available in the TUI.${available}`,
+            "info",
           );
         return;
       }
       const manager = await getManager();
       if (manager.view.size() === 0) {
         ctx.ui.notify(
-          "No subagents yet. The agent spawns them with subagent_spawn.",
+          `No subagents yet. The agent spawns them with subagent_spawn.${available}`,
           "info",
         );
         return;

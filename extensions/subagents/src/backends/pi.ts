@@ -26,9 +26,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
+import { applyToolDenylist } from "../agent-defs.ts";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type { SpawnTask, SubagentEvent, SubagentMeta } from "../domain.ts";
-import { SendError, SpawnError } from "../domain.ts";
+import { CHILD_EXCLUDED_TOOL_NAMES, SendError, SpawnError } from "../domain.ts";
 import {
   assistantParts,
   safeJson,
@@ -38,16 +39,6 @@ import {
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
-
-/** Tools that headless children must not receive. Everything else stays enabled. */
-const CHILD_EXCLUDED_TOOL_NAMES = [
-  "subagent_spawn",
-  "subagent_wait",
-  "subagent_cancel",
-  "subagent_check",
-  "subagent_list",
-  "ask_user",
-] as const;
 
 // --- Model + effort resolution -----------------------------------------------
 
@@ -95,12 +86,21 @@ function resolvePiModel(
 // --- Child session helpers (ported from v1 shared/child-session.ts) -----------
 
 /** Load normal global/package resources and trust-gated project resources. */
-async function createChildResources(cwd: string, projectTrusted: boolean) {
+async function createChildResources(
+  cwd: string,
+  projectTrusted: boolean,
+  systemPrompt: string | undefined,
+) {
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir, {
     projectTrusted,
   });
-  const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    ...(systemPrompt ? { systemPrompt } : {}),
+  });
   await loader.reload();
   return { loader, settingsManager };
 }
@@ -216,6 +216,11 @@ const makePiSession = (
         const { loader, settingsManager } = await createChildResources(
           task.cwd,
           task.parent.projectTrusted,
+          task.agent?.systemPrompt,
+        );
+        const allowedTools = applyToolDenylist(
+          task.agent?.tools,
+          CHILD_EXCLUDED_TOOL_NAMES,
         );
         const { session } = await createAgentSession({
           cwd: task.cwd,
@@ -224,6 +229,7 @@ const makePiSession = (
           resourceLoader: loader,
           model,
           thinkingLevel,
+          ...(allowedTools ? { tools: allowedTools } : {}),
           excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
         });
         // Start child extension session hooks/resources in headless mode.

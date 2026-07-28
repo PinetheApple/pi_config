@@ -13,7 +13,14 @@ import {
   getAgentDir,
   ProjectTrustStore,
 } from "@earendil-works/pi-coding-agent";
+import {
+  type AgentDefinition,
+  findAgentDefinition,
+  resolveAgentForHarness,
+} from "./agent-defs.ts";
+import { CHILD_EXCLUDED_TOOL_NAMES } from "./domain.ts";
 import type {
+  AgentSpec,
   BackendName,
   ReasoningEffort,
   SpawnTask,
@@ -41,6 +48,39 @@ export interface SubagentSpawnRequest {
   readonly origin?: SubagentOrigin;
   /** Name of the caller's directory argument, used in validation errors. */
   readonly workingDirLabel?: string;
+  /** Already projected onto the target harness by `resolveSpawnAgent`. */
+  readonly agent?: AgentSpec;
+}
+
+/**
+ * Look the agent up and project it onto the harness. An unknown name is a
+ * hard error: silently spawning a generic child would hide the fact that the
+ * requested persona never applied.
+ */
+export function resolveSpawnAgent(options: {
+  readonly agentName: string | undefined;
+  readonly definitions: readonly AgentDefinition[];
+  readonly harness: BackendName;
+  readonly ctx: SpawnParentContext;
+}): { spec?: AgentSpec; warnings: readonly string[] } {
+  if (!options.agentName) return { warnings: [] };
+  const definition = findAgentDefinition(
+    options.definitions,
+    options.agentName,
+  );
+  if (!definition) {
+    const known = options.definitions.map((def) => def.name).join(", ");
+    throw new Error(
+      `Unknown agent "${options.agentName}". Available: ${known || "none"}.`,
+    );
+  }
+  return resolveAgentForHarness({
+    definition,
+    harness: options.harness,
+    registry: options.ctx.modelRegistry,
+    provider: options.ctx.model?.provider,
+    toolDenylist: CHILD_EXCLUDED_TOOL_NAMES,
+  });
 }
 
 /**
@@ -96,8 +136,10 @@ export function buildSpawnTask(
     }),
     cwd,
     // Omitted model / effort inherit the parent's via the backend defaults.
-    model: request.model,
+    // An explicit model on the call outranks the agent's declared default.
+    model: request.model ?? request.agent?.model,
     reasoningEffort: request.reasoningEffort,
+    agent: request.agent,
     parent: {
       parentCwd: ctx.cwd,
       projectTrusted: resolveChildProjectTrust({
@@ -124,9 +166,17 @@ export async function spawnSubagent(options: {
   readonly thinkingLevel: string | undefined;
   readonly signal?: AbortSignal;
   readonly interruptMessage?: string;
+  readonly agentName?: string;
+  readonly agentDefinitions?: readonly AgentDefinition[];
 }) {
+  const agent = resolveSpawnAgent({
+    agentName: options.agentName,
+    definitions: options.agentDefinitions ?? [],
+    harness: options.harness,
+    ctx: options.ctx,
+  });
   const task = buildSpawnTask(
-    options.request,
+    { ...options.request, agent: agent.spec },
     options.ctx,
     options.thinkingLevel,
   );
@@ -135,5 +185,5 @@ export async function spawnSubagent(options: {
     options.manager.spawn(options.harness, task),
     { signal: options.signal, interruptMessage: options.interruptMessage },
   );
-  return { snapshot, task };
+  return { snapshot, task, warnings: agent.warnings };
 }
