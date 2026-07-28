@@ -24,9 +24,8 @@ import {
   type Severity,
 } from "./bar.ts";
 import { GO_LIMITS_DOC, goLimitGauges } from "./go-limits.ts";
-import { sumModelWindows, type ModelBucket, type SessionScan } from "./pi.ts";
+import type { ModelBucket, SessionScan } from "./pi.ts";
 import {
-  breakdownRows,
   sourceRow,
   windowRows,
   type GaugeRow,
@@ -148,28 +147,8 @@ export function buildOpencodeSection(
   const models: ModelBucket[] = scan.models.filter((bucket) =>
     isOpencodeProvider(bucket.provider),
   );
-  const windows = sumModelWindows(models);
 
-  rows.push(
-    ...goLimitGauges(models),
-    ...windowRows(
-      (window) => ({
-        label: WINDOW_LABELS[window],
-        usage: windows[window],
-        count: windows[window].messages,
-      }),
-      "replies",
-    ),
-    ...breakdownRows(
-      models.map((bucket) => ({
-        label: modelLabel(bucket.provider, bucket.model),
-        usage: bucket.windows.all,
-        count: bucket.windows.all.messages,
-      })),
-      windows.all.totalTokens,
-      "replies",
-    ),
-  );
+  rows.push(...goLimitGauges(models));
 
   return { heading, rows };
 }

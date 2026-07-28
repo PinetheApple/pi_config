@@ -212,7 +212,7 @@ test("isOpencodeProvider matches the Zen providers and nothing else", () => {
   assert.equal(isOpencodeProvider("opencodex"), false);
 });
 
-test("buildOpencodeSection names its source and keeps only Zen providers", () => {
+test("buildOpencodeSection names its source and shows only the Go limits", () => {
   const section = buildOpencodeSection(
     piScan([
       bucket("opencode-go", "kimi-k3", 750, 0.04, 3),
@@ -227,15 +227,11 @@ test("buildOpencodeSection names its source and keeps only Zen providers", () =>
   assert.ok(source?.kind === "text" && source.dim);
   assert.ok(source.kind === "text" && source.value.includes(SESSIONS_ROOT));
 
-  // The ollama bucket must not leak in, and shares are over the Zen total only.
-  const models = tables(section)[1];
-  assert.ok(models?.kind === "table");
+  // Only the published limits remain: no window table, no model breakdown.
+  assert.equal(tables(section).length, 0);
   assert.deepEqual(
-    models.spec.rows.map((row) => [row[0], row[1], row[2]]),
-    [
-      ["opencode-go/kimi-k3", "750", "75%"],
-      ["opencode/glm-5", "250", "25%"],
-    ],
+    section.rows.filter((row) => row.kind === "gauge").map((row) => row.label),
+    GO_LIMITS.map((limit) => limit.label),
   );
 });
 
@@ -291,54 +287,11 @@ test("buildOpencodeSection escalates severity as a Go limit is approached", () =
   assert.equal(spend(11).marker.trim(), "!!");
 });
 
-test("buildOpencodeSection surfaces opencode-go cost but hides an all-zero cost column", () => {
-  const withCost = firstTableLines(
-    buildOpencodeSection(piScan(), SESSIONS_ROOT),
-    WIDE,
-  );
-  assert.ok(withCost.head.includes("cost"));
-  assert.ok(withCost.rows[0]?.includes("$0.04"));
-
-  const free = firstTableLines(
-    buildOpencodeSection(
-      piScan([bucket("opencode", "glm-5", 250, 0, 1)]),
-      SESSIONS_ROOT,
-    ),
-    WIDE,
-  );
-  assert.ok(!free.head.includes("cost"));
-  assert.ok(!free.rows.some((row) => row.includes("$")));
-});
-
-test("buildOpencodeSection collapses idle windows", () => {
-  const models = [bucket("opencode-go", "kimi-k3", 750, 0.04, 3)];
-  Object.assign(models[0]!.windows.today, emptyUsageSummary());
-
-  const section = buildOpencodeSection(
-    { ...piScan(models), windows: sumModelWindows(models) },
-    SESSIONS_ROOT,
-  );
-  const windows = tables(section)[0];
-  assert.ok(windows?.kind === "table");
-  assert.deepEqual(
-    windows.spec.rows.map((row) => row[0]),
-    ["all time", "last 5 hours", "last 7 days", "last 30 days"],
-  );
-  assert.ok(
-    section.rows.some(
-      (row) => row.kind === "text" && row.value === "no activity: today",
-    ),
-  );
-});
-
-test("buildOpencodeSection reports no activity instead of zero rows", () => {
+test("buildOpencodeSection shows nothing but its source when there is no Go spend", () => {
   const section = buildOpencodeSection(piScan([]), SESSIONS_ROOT);
   assert.equal(tables(section).length, 0);
-  assert.ok(
-    section.rows.some(
-      (row) => row.kind === "text" && row.value === "no recorded activity",
-    ),
-  );
+  assert.equal(section.rows.length, 1);
+  assert.equal(section.rows[0]?.kind, "text");
 });
 
 test("buildOpencodeSection degrades to one reason line when the scan is missing", () => {
@@ -453,7 +406,9 @@ test("renderUsageText renders every section without a TUI", () => {
   assert.ok(text.includes("Claude Code plan"));
   assert.ok(text.includes(`\n${OPENCODE_HEADING}\n`));
   assert.ok(!text.includes("opencode app"));
-  assert.ok(text.includes("opencode-go/kimi-k3"));
+  // Only the published limits, no per-model breakdown anywhere.
+  assert.ok(!text.includes("opencode-go/kimi-k3"));
+  assert.ok(text.includes(GO_LIMITS[0]!.label));
   // Bars stay exclusive to the quota section, which is the only real limit.
   assert.equal(text.split("█").length - 1 > 0, true);
   for (const line of text.split("\n")) assert.ok(line.length <= WIDE, line);

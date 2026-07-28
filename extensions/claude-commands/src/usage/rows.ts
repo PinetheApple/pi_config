@@ -4,12 +4,10 @@
  */
 
 import type { UsageSummary } from "../../../shared/usage-totals.ts";
-import { formatCost, formatPercent, formatTokens } from "../format.ts";
+import { formatCost, formatTokens } from "../format.ts";
 import type { TableSpec } from "./table.ts";
 import { USAGE_WINDOWS, type UsageWindow } from "./window.ts";
 
-/** Enough model rows to be useful without turning the panel into a report. */
-export const MAX_MODEL_ROWS = 6;
 /** The label and the headline token count survive any terminal width. */
 const MIN_TABLE_COLUMNS = 2;
 
@@ -85,25 +83,6 @@ function windowsTable(
   };
 }
 
-function breakdownTable(
-  entries: readonly UsageEntry[],
-  total: number,
-  countHeader: string,
-): TableSpec {
-  const cost = anyCost(entries);
-  return {
-    head: ["model", "tokens", "share", ...(cost ? ["cost"] : []), countHeader],
-    rows: entries.map((entry) => [
-      entry.label,
-      formatTokens(entry.usage.totalTokens),
-      formatPercent(total > 0 ? entry.usage.totalTokens / total : undefined, 0),
-      ...(cost ? [formatCost(entry.usage.cost)] : []),
-      String(entry.count),
-    ]),
-    minColumns: MIN_TABLE_COLUMNS,
-  };
-}
-
 /** A window earns a row only if something happened in it. */
 function isActive(entry: UsageEntry) {
   return entry.usage.totalTokens > 0 || entry.count > 0;
@@ -134,23 +113,6 @@ export function windowRows(
       value: `no activity: ${idle.join(", ")}`,
       dim: true,
     });
-  }
-  return rows;
-}
-
-export function breakdownRows(
-  entries: readonly UsageEntry[],
-  total: number,
-  countHeader: string,
-): UsageRow[] {
-  if (entries.length === 0) return [];
-  const top = entries.slice(0, MAX_MODEL_ROWS);
-  const rows: UsageRow[] = [
-    { kind: "table", spec: breakdownTable(top, total, countHeader) },
-  ];
-  const hidden = entries.length - top.length;
-  if (hidden > 0) {
-    rows.push({ kind: "text", value: `+${hidden} more`, dim: true });
   }
   return rows;
 }
