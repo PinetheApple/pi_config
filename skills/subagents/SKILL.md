@@ -7,6 +7,17 @@ description: invoke this skill when the user asks you to use subagents
 
 Each subagent is headless, has its own context window, cannot see the parent conversation, cannot ask the user, and cannot spawn subagents. Give every child a self-contained prompt with paths, constraints, and the expected report.
 
+## Agent Definitions
+
+The `agent` parameter names one of the definitions in `~/.config/ai/agents/*.md` (Claude subagent frontmatter). The spawn tool's description lists the catalog, and the parameter is an enum of the names it found, so an unknown name is rejected with the list of known ones. Picking an agent applies its system prompt, its tool restrictions, and its default model; omit it for a general-purpose subagent.
+
+What to expect when you use one:
+
+- **Tools are translated, and drops are visible.** Claude tool names map onto pi's (`Grep` → `grep`/`rg`, `Glob` → `find`/`fd`/`ls`, and so on). `Task`/`Agent` are always refused — children cannot spawn children — and `mcp__*` tools have no pi equivalent. Every dropped tool produces a warning shown to the user and repeated in the spawn result, so read the result rather than assuming the child got what the definition asked for. On the `claude` harness nothing is translated; on `codex`, tool restrictions do not exist at all and the definition's list is ignored with a warning.
+- **Model aliases stay inside the current provider.** `opus`/`sonnet`/`haiku` resolve only among models of the session's own provider, so an `opus` agent is never silently rerouted onto a metered endpoint. When there is no match the child falls back to the session default and says so in a warning.
+- **An explicit `model` on the spawn call wins** over the agent's declared model.
+- **Definitions are read once, at extension load.** Editing an agent `.md` mid-session changes nothing until `/reload`, because the tool schema bakes the agent names in.
+
 ## Pi Harness
 
 **Harness:** `pi`
@@ -72,7 +83,9 @@ Requires the Codex CLI to be installed and authenticated.
 
 ## Spawn and Manage
 
-Call `subagent_spawn` with a complete `prompt`, short `name`, chosen `harness`, and optional `working_dir`, `model`, and `reasoning_effort`. At most four subagents run concurrently.
+Call `subagent_spawn` with a complete `prompt`, short `name`, chosen `harness`, and optional `agent`, `working_dir`, `model`, and `reasoning_effort`. At most four subagents run concurrently.
+
+`/subagent-spawn` does the same thing from the command line: `/subagent-spawn [--agent <name>] [--harness pi|claude|codex] [--model <id>] [--effort <level>] [--dir <path>] [--name <title>] <prompt>`. With no flags it prompts interactively.
 
 - `subagent_check({ id })`: peek without blocking.
 - `subagent_list()`: list all runs.

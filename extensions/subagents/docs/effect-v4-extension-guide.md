@@ -11,6 +11,11 @@
 >
 > Audience: the agents migrating `firecrawl-search`, `ask-user`, `model-info`,
 > `git-info`, `ui-customization`, and `copy-all`.
+>
+> **Historical note (added after the fact):** `extensions/firecrawl-search` was removed
+> from this repo in `ac6957c`. The guidance is unchanged — §4's "wrapping a Promise SDK"
+> recipe still applies to any SDK-backed extension — but its running example is code that
+> now only exists in git history.
 
 ---
 
