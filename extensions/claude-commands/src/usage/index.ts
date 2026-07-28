@@ -7,7 +7,6 @@
 import { dirname } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { fetchClaudeQuota } from "./claude.ts";
-import { OPENCODE_DB_PATH, readOpencodeUsage } from "./opencode.ts";
 import { showUsageOverlay } from "./overlay.ts";
 import { scanSessionDir, summarizeBranch } from "./pi.ts";
 import { buildUsageView, renderUsageText } from "./view.ts";
@@ -20,9 +19,8 @@ export async function collectUsage(ctx: ExtensionCommandContext) {
   // The cwd-encoded session dir sits one level under the sessions root; scan
   // the root so opencode-go turns from other projects are not invisible.
   const sessionsRoot = dirname(ctx.sessionManager.getSessionDir());
-  const [scan, opencode, quota] = await Promise.all([
+  const [scan, quota] = await Promise.all([
     scanSessionDir(sessionsRoot, now),
-    readOpencodeUsage(OPENCODE_DB_PATH, now),
     fetchClaudeQuota({ signal: ctx.signal }),
   ]);
 
@@ -30,7 +28,6 @@ export async function collectUsage(ctx: ExtensionCommandContext) {
     branch: summarizeBranch(ctx.sessionManager.getBranch()),
     scan,
     sessionsRoot,
-    opencode,
     quota,
     now,
   });
