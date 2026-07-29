@@ -13,6 +13,7 @@ import { piBackend } from "./src/backends/pi.ts";
 import { makeStubBackend } from "./src/backends/stub.ts";
 import type { BackendName, ParentContext, SpawnTask } from "./src/domain.ts";
 import {
+  MAX_RUNNING,
   SubagentManager,
   SubagentManagerLive,
   type SubagentManagerShape,
@@ -49,6 +50,7 @@ export const createTestRuntime = () =>
 export type TestRuntime = ReturnType<typeof createTestRuntime>;
 
 export const parent: ParentContext = {
+  depth: 0,
   parentCwd: process.cwd(),
   projectTrusted: false,
 };
@@ -68,3 +70,10 @@ export async function withManager(
     await runtime.dispose();
   }
 }
+
+/** Exactly enough tasks to saturate the cap: [1..MAX_RUNNING]. */
+export const capRange = () =>
+  Array.from({ length: MAX_RUNNING }, (_, index) => index + 1);
+
+/** The rejection every over-cap spawn or restart must produce. */
+export const capMessage = new RegExp(`Max ${MAX_RUNNING} subagents`);

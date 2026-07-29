@@ -75,6 +75,11 @@ export interface Entry {
   /** Idle restart dispatched but RunStarted not folded yet; counts as running
    * so concurrent restarts cannot race past the cap. */
   restarting?: boolean;
+  /**
+   * True while this entry holds a slot in the process-wide budget. Set when
+   * it starts running, cleared by `settle`.
+   */
+  ownsGlobalSlot?: boolean;
 }
 
 export function appendTranscript(

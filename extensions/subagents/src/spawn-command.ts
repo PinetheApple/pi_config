@@ -15,6 +15,7 @@ import type { AgentDefinition } from "./agent-defs.ts";
 import {
   BACKEND_NAMES,
   type BackendName,
+  DEFAULT_HARNESS,
   type ReasoningEffort,
   REASONING_EFFORTS,
 } from "./domain.ts";
@@ -36,7 +37,6 @@ export const SPAWN_COMMAND_FLAGS = [
 export const SPAWN_COMMAND_USAGE =
   "/subagent-spawn [--agent <name>] [--harness pi|claude|codex] [--model <id>] [--effort <level>] [--dir <path>] [--name <title>] <prompt>";
 
-const DEFAULT_HARNESS: BackendName = "pi";
 const WIZARD_TITLE_MAX_LENGTH = 60;
 /** Explicit "no override" choice in the model / effort selectors. */
 const INHERIT_CHOICE = "inherit from this session";
@@ -237,6 +237,8 @@ export async function runSubagentSpawnCommand(options: {
   readonly manager: SubagentManagerShape;
   readonly runtime: SubagentRuntime;
   readonly thinkingLevel: string | undefined;
+  /** Depth of the session running the command; children go one deeper. */
+  readonly sessionDepth?: number;
   readonly agentDefinitions?: readonly AgentDefinition[];
 }) {
   const { ctx, manager } = options;
@@ -259,11 +261,14 @@ export async function runSubagentSpawnCommand(options: {
 
   let id: string;
   let title: string;
+  // The agent definition can override the picked harness; report the real one.
+  let harness: BackendName;
   try {
-    const { snapshot } = await spawnSubagent({
+    const { snapshot, ...spawned } = await spawnSubagent({
       runtime: options.runtime,
       manager,
       harness: resolved.harness,
+      sessionDepth: options.sessionDepth,
       request: {
         prompt: resolved.prompt,
         title: resolved.title,
@@ -279,6 +284,8 @@ export async function runSubagentSpawnCommand(options: {
     });
     id = snapshot.id;
     title = snapshot.title;
+    harness = spawned.harness;
+    for (const warning of spawned.warnings) report(ctx, warning);
   } catch (error) {
     // Concurrency limit, unknown model, unavailable backend: all readable.
     report(ctx, error instanceof Error ? error.message : String(error), true);
@@ -289,5 +296,5 @@ export async function runSubagentSpawnCommand(options: {
     await openSubagentTakeover(ctx, manager.view, id);
     return;
   }
-  report(ctx, `Spawned subagent ${id} "${title}" on ${resolved.harness}.`);
+  report(ctx, `Spawned subagent ${id} "${title}" on ${harness}.`);
 }

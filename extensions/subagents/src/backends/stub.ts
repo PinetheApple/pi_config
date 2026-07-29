@@ -188,6 +188,21 @@ const makeStubSession = (
           _tag: "AssistantMessage",
           parts: [{ type: "text", text: finalText }],
         });
+        // Custom tools reach a real child through createAgentSession; the stub
+        // calls the last one once so callers that inject a result tool (the
+        // workflow transport) see it exercised.
+        const custom = task.customTools?.at(-1);
+        if (custom && turn === 0) {
+          yield* Effect.promise(async () => {
+            await custom.execute(
+              `${sessionId}-custom-${turn}`,
+              { stub: true },
+              new AbortController().signal,
+              () => {},
+              undefined as never,
+            );
+          }).pipe(Effect.ignore);
+        }
         yield* emit({
           _tag: "UsageChanged",
           tokens: Math.min(profile.contextWindow, 2400 * (turn + 1) + 900),

@@ -17,6 +17,7 @@ import {
   type AgentDefinition,
   findAgentDefinition,
   resolveAgentForHarness,
+  resolveHarness,
 } from "./agent-defs.ts";
 import { CHILD_EXCLUDED_TOOL_NAMES } from "./domain.ts";
 import type {
@@ -53,34 +54,44 @@ export interface SubagentSpawnRequest {
 }
 
 /**
- * Look the agent up and project it onto the harness. An unknown name is a
- * hard error: silently spawning a generic child would hide the fact that the
- * requested persona never applied.
+ * Settle the harness, then look the agent up and project it onto that harness.
+ * An unknown name is a hard error: silently spawning a generic child would
+ * hide the fact that the requested persona never applied.
+ *
+ * The harness comes back too, because the definition can decide it: with no
+ * `harness` argument the agent's own `prefer` picks, and its `require`
+ * overrides even an explicit one. See `resolveHarness` for the full order.
  */
 export function resolveSpawnAgent(options: {
   readonly agentName: string | undefined;
   readonly definitions: readonly AgentDefinition[];
-  readonly harness: BackendName;
+  /** The caller's explicit choice; omitted lets the definition decide. */
+  readonly harness?: BackendName;
   readonly ctx: SpawnParentContext;
-}): { spec?: AgentSpec; warnings: readonly string[] } {
-  if (!options.agentName) return { warnings: [] };
-  const definition = findAgentDefinition(
-    options.definitions,
-    options.agentName,
-  );
-  if (!definition) {
+}): { harness: BackendName; spec?: AgentSpec; warnings: readonly string[] } {
+  const definition = options.agentName
+    ? findAgentDefinition(options.definitions, options.agentName)
+    : undefined;
+  if (options.agentName && !definition) {
     const known = options.definitions.map((def) => def.name).join(", ");
     throw new Error(
       `Unknown agent "${options.agentName}". Available: ${known || "none"}.`,
     );
   }
-  return resolveAgentForHarness({
+  const picked = resolveHarness({ requested: options.harness, definition });
+  if (!definition) return { harness: picked.harness, warnings: [] };
+  const resolved = resolveAgentForHarness({
     definition,
-    harness: options.harness,
+    harness: picked.harness,
     registry: options.ctx.modelRegistry,
     provider: options.ctx.model?.provider,
     toolDenylist: CHILD_EXCLUDED_TOOL_NAMES,
   });
+  return {
+    harness: picked.harness,
+    spec: resolved.spec,
+    warnings: [...picked.warnings, ...resolved.warnings],
+  };
 }
 
 /**
@@ -121,6 +132,7 @@ export function buildSpawnTask(
   request: SubagentSpawnRequest,
   ctx: SpawnParentContext,
   thinkingLevel: string | undefined,
+  sessionDepth = 0,
 ): SpawnTask {
   const cwd = resolveSpawnCwd(
     ctx.cwd,
@@ -136,11 +148,12 @@ export function buildSpawnTask(
     }),
     cwd,
     // Omitted model / effort inherit the parent's via the backend defaults.
-    // An explicit model on the call outranks the agent's declared default.
+    // An explicit value on the call outranks the agent's declared default.
     model: request.model ?? request.agent?.model,
-    reasoningEffort: request.reasoningEffort,
+    reasoningEffort: request.reasoningEffort ?? request.agent?.reasoningEffort,
     agent: request.agent,
     parent: {
+      depth: sessionDepth,
       parentCwd: ctx.cwd,
       projectTrusted: resolveChildProjectTrust({
         parentCwd: ctx.cwd,
@@ -160,7 +173,8 @@ export function buildSpawnTask(
 export async function spawnSubagent(options: {
   readonly runtime: SubagentRuntime;
   readonly manager: SubagentManagerShape;
-  readonly harness: BackendName;
+  /** The caller's explicit choice; omitted lets the agent definition decide. */
+  readonly harness?: BackendName;
   readonly request: SubagentSpawnRequest;
   readonly ctx: SpawnParentContext;
   readonly thinkingLevel: string | undefined;
@@ -168,6 +182,8 @@ export async function spawnSubagent(options: {
   readonly interruptMessage?: string;
   readonly agentName?: string;
   readonly agentDefinitions?: readonly AgentDefinition[];
+  /** Depth of the session doing the spawning; children go one deeper. */
+  readonly sessionDepth?: number;
 }) {
   const agent = resolveSpawnAgent({
     agentName: options.agentName,
@@ -179,11 +195,12 @@ export async function spawnSubagent(options: {
     { ...options.request, agent: agent.spec },
     options.ctx,
     options.thinkingLevel,
+    options.sessionDepth,
   );
   const snapshot = await runTool(
     options.runtime,
-    options.manager.spawn(options.harness, task),
+    options.manager.spawn(agent.harness, task),
     { signal: options.signal, interruptMessage: options.interruptMessage },
   );
-  return { snapshot, task, warnings: agent.warnings };
+  return { snapshot, task, harness: agent.harness, warnings: agent.warnings };
 }

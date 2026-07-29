@@ -10,8 +10,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect } from "effect";
 import type { SpawnTask } from "./src/domain.ts";
+import { MAX_RUNNING } from "./src/manager.ts";
 import { runTool } from "./src/runtime.ts";
-import { task, withManager } from "./test-harness.ts";
+import { capMessage, capRange, task, withManager } from "./test-harness.ts";
 
 test("stub subagent completes and delivers a final result", async () => {
   await withManager(async (manager, runtime) => {
@@ -115,9 +116,9 @@ test("the global concurrency cap includes by-the-way sessions", async () => {
   await withManager(async (manager, runtime) => {
     const tasks: SpawnTask[] = [
       { ...task("side question"), origin: "btw" },
-      task("Task 2"),
-      task("Task 3"),
-      task("Task 4"),
+      ...capRange()
+        .slice(1)
+        .map((n) => task(`Task ${n}`)),
     ];
     const spawns = await runTool(
       runtime,
@@ -125,7 +126,7 @@ test("the global concurrency cap includes by-the-way sessions", async () => {
         concurrency: "unbounded",
       }),
     );
-    assert.equal(spawns.length, 4);
+    assert.equal(spawns.length, MAX_RUNNING);
     await assert.rejects(
       runTool(
         runtime,
@@ -134,7 +135,7 @@ test("the global concurrency cap includes by-the-way sessions", async () => {
           origin: "btw",
         }),
       ),
-      /Max 4 subagents/,
+      capMessage,
     );
   });
 });
@@ -144,15 +145,15 @@ test("the concurrency cap rejects a fifth running subagent", async () => {
     const spawns = await runTool(
       runtime,
       Effect.forEach(
-        [1, 2, 3, 4],
+        capRange(),
         (n) => manager.spawn("codex", task(`Task ${n}`)),
         { concurrency: "unbounded" },
       ),
     );
-    assert.equal(spawns.length, 4);
+    assert.equal(spawns.length, MAX_RUNNING);
     await assert.rejects(
       runTool(runtime, manager.spawn("codex", task("Task 5"))),
-      /Max 4 subagents/,
+      capMessage,
     );
   });
 });
@@ -180,7 +181,7 @@ test("idle restarts respect the concurrency cap", async () => {
     await runTool(
       runtime,
       Effect.forEach(
-        [1, 2, 3, 4],
+        capRange(),
         (n) => manager.spawn("codex", task(`Task ${n}`)),
         { concurrency: "unbounded" },
       ),
@@ -188,7 +189,7 @@ test("idle restarts respect the concurrency cap", async () => {
     // Restarting the settled one would be a fifth concurrent run.
     await assert.rejects(
       runTool(runtime, manager.send(settled.id, "go again")),
-      /Max 4 subagents/,
+      capMessage,
     );
     assert.equal(manager.view.get(settled.id)?.status, "done");
   });
