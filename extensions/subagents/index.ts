@@ -51,8 +51,8 @@ import {
   type SubagentSnapshot,
 } from "./src/domain.ts";
 import {
-  formatActivityStatus,
   formatContextUtilization,
+  formatSubagentWidget,
 } from "./src/format.ts";
 import {
   MAX_TRACKED,
@@ -154,7 +154,7 @@ export default function (pi: ExtensionAPI) {
   let managerPromise: Promise<SubagentManagerShape> | undefined;
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
-  let unsubStatus: (() => void) | undefined;
+  let unsubView: (() => void) | undefined;
   // Loaded in session_start, where the session cwd and the project's trust
   // decision are both known. Empty until then.
   let agentDefinitions: readonly AgentDefinition[] = [];
@@ -181,30 +181,26 @@ export default function (pi: ExtensionAPI) {
       .runPromise(SubagentManager)
       .then((manager) => {
         manager.view.setOnSettled(onSettled);
-        unsubStatus?.();
-        unsubStatus = manager.view.subscribe(() => {
-          updateStatus(manager);
+        unsubView?.();
+        unsubView = manager.view.subscribe(() => {
+          updateWidget(manager);
           persistRecords(manager);
         });
-        updateStatus(manager);
+        updateWidget(manager);
         return manager;
       });
     return managerPromise;
   };
 
-  const updateStatus = (manager: SubagentManagerShape) => {
+  /**
+   * Subagent activity lives above the editor, not in the footer: there is room
+   * for one row per child, and it disappears entirely when none exist.
+   */
+  const updateWidget = (manager: SubagentManagerShape) => {
     if (!ui) return;
-    const subs = manager.view.list();
-    if (subs.length === 0) {
-      ui.setStatus("subagents", undefined);
-      return;
-    }
-    const running = subs.filter((snap) => snap.status === "running").length;
-    const failed = subs.filter((snap) => snap.status === "error").length;
-    const done = subs.length - running - failed;
-    ui.setStatus(
+    ui.setWidget(
       "subagents",
-      formatActivityStatus(ui.theme, { running, done, failed }),
+      formatSubagentWidget(ui.theme, manager.view.list()),
     );
   };
 
@@ -346,9 +342,9 @@ export default function (pi: ExtensionAPI) {
     clearSubagentHost(host);
     resultDelivery.clear();
     recordWriter.clear();
-    unsubStatus?.();
-    unsubStatus = undefined;
-    ui?.setStatus("subagents", undefined);
+    unsubView?.();
+    unsubView = undefined;
+    ui?.setWidget("subagents", undefined);
     ui = undefined;
     const closing = runtime;
     runtime = undefined;
