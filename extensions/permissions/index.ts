@@ -23,6 +23,7 @@ import {
 import { childPermissionMode } from "../shared/child-permission-mode.ts";
 import { loadPermissionConfig, type PermissionConfig } from "./src/config.ts";
 import { decide, resolveUnattended } from "./src/decide.ts";
+import { formatPermissionStatus, type StatusTheme } from "./src/status.ts";
 import {
   modeEntry,
   PERMISSION_MODE_ENTRY,
@@ -42,11 +43,11 @@ export default function (pi: ExtensionAPI) {
   let isChild = false;
 
   const showStatus = (ctx: {
-    ui: { setStatus: (k: string, t?: string) => void };
+    ui: { setStatus: (k: string, t?: string) => void; theme: StatusTheme };
   }) => {
     ctx.ui.setStatus(
       STATUS_KEY,
-      mode ? PERMISSION_MODE_LABELS[mode] : undefined,
+      mode ? formatPermissionStatus(ctx.ui.theme, mode) : undefined,
     );
   };
 
@@ -114,15 +115,11 @@ export default function (pi: ExtensionAPI) {
     showStatus(ctx);
   };
 
-  const cycle = (ctx: {
-    ui: {
-      setStatus: (k: string, t?: string) => void;
-      notify: (m: string) => void;
-    };
-  }) => {
+  // No notify here: the footer status is persistent and already says the mode,
+  // so announcing it as well printed the same words twice per keystroke.
+  const cycle = (ctx: Parameters<typeof showStatus>[0]) => {
     if (!mode) return;
     setMode(cyclePermissionMode(mode), ctx);
-    ctx.ui.notify(`Permission mode: ${PERMISSION_MODE_LABELS[mode]}`);
   };
 
   // shift+tab is pi's `app.thinking.cycle` by default, and the extension runner
