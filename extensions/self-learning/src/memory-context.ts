@@ -6,6 +6,14 @@ const AI_CONFIG_ROOT = join(homedir(), ".config", "ai");
 const PERSONA_FILE = join(AI_CONFIG_ROOT, "persona.md");
 const GLOBAL_MEMORY_INDEX = join(AI_CONFIG_ROOT, "memory", "MEMORY.md");
 const WORKTREE_SUFFIX = /--claude-worktrees-.*$/;
+/**
+ * Claude Code's project-slug encoding: `/`, `.` and `_` all collapse to `-`,
+ * everything else (case, existing hyphens, digits) is preserved. Derived by
+ * checking every slug in `~/.config/ai/projects` against its real path — e.g.
+ * `/home/pineapple/.pi/agent` → `-home-pineapple--pi-agent` and
+ * `/home/pineapple/Development/music_app` → `-home-pineapple-Development-music-app`.
+ */
+const SLUG_SEPARATORS = /[/._]/g;
 
 const BOOTSTRAP_HEADING = "# Agent Session Bootstrap";
 const BOOTSTRAP_NUDGE =
@@ -16,7 +24,7 @@ const BOOTSTRAP_NUDGE =
 
 /** A worktree shares its parent's memory store, so the branch suffix is stripped. */
 export function projectSlug(cwd: string) {
-  return cwd.replaceAll("/", "-").replace(WORKTREE_SUFFIX, "");
+  return cwd.replace(SLUG_SEPARATORS, "-").replace(WORKTREE_SUFFIX, "");
 }
 
 export function projectMemoryIndexPath(cwd: string) {
