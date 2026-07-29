@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect } from "effect";
 import { SubagentManager, type SubagentReadModel } from "./src/manager.ts";
-import { claudeBackend } from "./src/backends/claude.ts";
+import {
+  claudeBackend,
+  claudePermissionOptions,
+} from "./src/backends/claude.ts";
 import type { ParentContext, SpawnTask } from "./src/domain.ts";
 import { createSubagentRuntime, runTool } from "./src/runtime.ts";
 
@@ -162,3 +165,69 @@ test(
     }
   },
 );
+
+// --- child permission options (pure; no CLI required) ------------------------
+
+function permTask(agent?: SpawnTask["agent"]): SpawnTask {
+  return {
+    prompt: "p",
+    title: "t",
+    cwd: process.cwd(),
+    parent,
+    ...(agent ? { agent } : {}),
+  };
+}
+
+function spec(overrides: Partial<NonNullable<SpawnTask["agent"]>>) {
+  return {
+    name: "a",
+    description: "d",
+    systemPrompt: "s",
+    ...overrides,
+  } satisfies NonNullable<SpawnTask["agent"]>;
+}
+
+test("a silent agent definition still gets bypassPermissions and the skip flag", () => {
+  const options = claudePermissionOptions(permTask());
+  assert.equal(options.permissionMode, "bypassPermissions");
+  assert.equal(options.allowDangerouslySkipPermissions, true);
+});
+
+test("an explicit permissionMode tightens the child and drops the skip flag", () => {
+  const options = claudePermissionOptions(
+    permTask(spec({ permissionMode: "plan" })),
+  );
+  assert.equal(options.permissionMode, "plan");
+  assert.equal(options.allowDangerouslySkipPermissions, undefined);
+});
+
+test("Agent and Task stay denied whatever the definition says", () => {
+  for (const task of [
+    permTask(),
+    permTask(spec({ permissionMode: "plan" })),
+    permTask(spec({ disallowedTools: ["WebFetch"] })),
+    permTask(spec({ tools: ["Agent", "Task"] })),
+  ]) {
+    const denied = claudePermissionOptions(task).disallowedTools;
+    assert.ok(denied.includes("Agent"), JSON.stringify(denied));
+    assert.ok(denied.includes("Task"), JSON.stringify(denied));
+  }
+});
+
+test("a definition's disallowedTools are appended to the structural denial", () => {
+  const denied = claudePermissionOptions(
+    permTask(spec({ disallowedTools: ["WebFetch", "Bash"] })),
+  ).disallowedTools;
+  assert.deepEqual(denied, ["Agent", "Task", "WebFetch", "Bash"]);
+});
+
+test("an untrusted cwd restricts the child to user-level settings", () => {
+  assert.deepEqual(claudePermissionOptions(permTask()).settingSources, [
+    "user",
+  ]);
+  const trusted: SpawnTask = {
+    ...permTask(),
+    parent: { ...parent, projectTrusted: true },
+  };
+  assert.equal(claudePermissionOptions(trusted).settingSources, undefined);
+});
