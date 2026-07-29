@@ -21,6 +21,11 @@ import {
   Scope,
   Stream,
 } from "effect";
+import {
+  acquireGlobalSlot,
+  MAX_TOTAL_RUNNING,
+  releaseGlobalSlot,
+} from "../../shared/subagent-budget.ts";
 import type { SubagentBackend } from "./backend.ts";
 import { BackendRegistry } from "./backend.ts";
 import type {
@@ -45,7 +50,7 @@ import {
   makeFoldEvent,
 } from "./snapshot.ts";
 
-export const MAX_RUNNING = 4;
+export const MAX_RUNNING = 5;
 export const MAX_TRACKED = 64;
 const STOP_TIMEOUT_MS = 5_000;
 
@@ -111,6 +116,11 @@ export interface SubagentManagerShape {
   cancel(
     ids: ReadonlyArray<string>,
   ): Effect.Effect<ReadonlyArray<CancelResult>>;
+  /**
+   * Stop a running subagent and settle it as a success with `finalText`, for
+   * callers that know the work completed before the backend does.
+   */
+  completeAndStop(id: string, finalText: string): Effect.Effect<void>;
   send(id: string, text: string): Effect.Effect<void, SendError>;
   /**
    * Rehydrate terminal entries from persisted `subagent-record`s (session
@@ -243,6 +253,12 @@ const makeManager = Effect.gen(function* () {
     const s = entry.snapshot;
     entry.restarting = false;
     if (s.status !== "running") return;
+    // Exactly one release per running->settled transition; the early return
+    // above makes settle idempotent.
+    if (entry.ownsGlobalSlot) {
+      entry.ownsGlobalSlot = false;
+      releaseGlobalSlot();
+    }
     s.settledAt = Date.now();
     switch (outcome._tag) {
       case "Completed":
@@ -287,6 +303,8 @@ const makeManager = Effect.gen(function* () {
 
   const spawn = (backendName: BackendName, task: SpawnTask) =>
     Effect.gen(function* () {
+      /** Cleared once a live entry takes ownership of the global slot. */
+      let slotTransferred = false;
       // Reserve synchronously (before the first yield inside doSpawn) so
       // parallel tool calls cannot race past the global cap.
       yield* Effect.suspend(
@@ -299,6 +317,13 @@ const makeManager = Effect.gen(function* () {
           if (runningCount() + reserved >= MAX_RUNNING) {
             return new ConcurrencyLimitError({
               message: `Max ${MAX_RUNNING} subagents can run concurrently. Wait for one to finish before spawning another.`,
+            });
+          }
+          // The per-session cap bounds one level; nested sessions each have
+          // their own, so the process-wide budget is what bounds the tree.
+          if (!acquireGlobalSlot()) {
+            return new ConcurrencyLimitError({
+              message: `Max ${MAX_TOTAL_RUNNING} subagents can run concurrently across all sessions in this process. Wait for one to finish before spawning another.`,
             });
           }
           reserved++;
@@ -358,6 +383,8 @@ const makeManager = Effect.gen(function* () {
           liveToolMap: new Map(),
         };
         entries.set(id, entry);
+        entry.ownsGlobalSlot = true;
+        slotTransferred = true;
 
         // Pump: fold the event stream into the snapshot. Tied to the entry
         // scope, so closing the scope stops it. If the stream ends while the
@@ -386,6 +413,9 @@ const makeManager = Effect.gen(function* () {
         Effect.ensuring(
           Effect.sync(() => {
             reserved--;
+            // The entry owns the slot once it is running and releases it when
+            // it settles. A spawn that never got that far hands it back here.
+            if (!slotTransferred) releaseGlobalSlot();
             notify();
           }),
         ),
@@ -474,6 +504,30 @@ const makeManager = Effect.gen(function* () {
       }
     });
 
+  /**
+   * Stop a running subagent and record it as a success.
+   *
+   * Some callers know a run finished correctly *before* the backend does — a
+   * workflow agent that has submitted its structured result is done, and the
+   * remaining turn is dead weight. Interrupting such a run would settle it as
+   * "error / Run was aborted", which is simply wrong: the work succeeded.
+   */
+  const completeAndStop = (id: string, finalText: string) =>
+    Effect.suspend(() => {
+      const entry = entries.get(id);
+      if (!entry || entry.snapshot.status !== "running") return Effect.void;
+      // Settle first, so neither the backend's Interrupted event nor the
+      // pump's stream-ended fallback can overwrite the terminal reason.
+      settle(entry, { _tag: "Completed", finalText });
+      notify(id);
+      const session = entry.session;
+      if (!session) return Effect.void;
+      return session.interrupt.pipe(
+        Effect.timeout(STOP_TIMEOUT_MS),
+        Effect.ignore,
+      );
+    });
+
   const cancel = (ids: ReadonlyArray<string>) =>
     Effect.suspend(() => {
       const unique = [...new Set(ids)];
@@ -538,6 +592,12 @@ const makeManager = Effect.gen(function* () {
             message: `Max ${MAX_RUNNING} subagents can run concurrently; restarting "${id}" would exceed that.`,
           });
         }
+        if (!acquireGlobalSlot()) {
+          return new SendError({
+            message: `Max ${MAX_TOTAL_RUNNING} subagents can run concurrently across all sessions in this process; restarting "${id}" would exceed that.`,
+          });
+        }
+        entry.ownsGlobalSlot = true;
         // Occupy the slot synchronously: the RunStarted that flips status
         // arrives via the async pump, and two concurrent restarts must not
         // both pass the check in that window. Cleared by RunStarted/settle,
@@ -547,6 +607,10 @@ const makeManager = Effect.gen(function* () {
           Effect.onError(() =>
             Effect.sync(() => {
               entry.restarting = false;
+              if (entry.ownsGlobalSlot) {
+                entry.ownsGlobalSlot = false;
+                releaseGlobalSlot();
+              }
             }),
           ),
         );
@@ -558,6 +622,15 @@ const makeManager = Effect.gen(function* () {
     disposed = true;
     const all = [...entries.values()];
     entries.clear();
+    // Hand every still-running entry's global slot back before the entries
+    // are dropped; otherwise a session that shuts down mid-run would leak
+    // process-wide capacity that nothing can ever release.
+    for (const entry of all) {
+      if (entry.ownsGlobalSlot) {
+        entry.ownsGlobalSlot = false;
+        releaseGlobalSlot();
+      }
+    }
     yield* Effect.forEach(
       all,
       (entry) =>
@@ -634,6 +707,7 @@ const makeManager = Effect.gen(function* () {
     spawn,
     waitFor,
     cancel,
+    completeAndStop,
     send,
     adopt,
     get: (id) => Effect.sync(() => entries.get(id)?.snapshot),

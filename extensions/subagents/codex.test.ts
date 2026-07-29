@@ -7,6 +7,7 @@ import { SubagentManager } from "./src/manager.ts";
 import { createSubagentRuntime, runTool } from "./src/runtime.ts";
 
 const parent: ParentContext = {
+  depth: 0,
   parentCwd: process.cwd(),
   projectTrusted: false,
 };
