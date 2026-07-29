@@ -35,6 +35,7 @@ import {
   SendError,
   SpawnError,
 } from "../domain.ts";
+import { registerChildPermissionMode } from "../../../shared/child-permission-mode.ts";
 import {
   canSpawnAtDepth,
   registerSessionDepth,
@@ -230,7 +231,13 @@ const makePiSession = (
         // A child one level below its parent. At the ceiling it keeps every
         // tool except orchestration, so it can still do the work asked of it.
         const childDepth = task.parent.depth + 1;
-        const excluded = excludedToolsAtDepth(canSpawnAtDepth(childDepth));
+        // A definition's `disallowedTools` joins the structural exclusions
+        // rather than only subtracting from `tools`: an agent may deny without
+        // allowlisting anything, and excludeTools is what makes that bite.
+        const excluded = [
+          ...excludedToolsAtDepth(canSpawnAtDepth(childDepth)),
+          ...(task.agent?.disallowedTools ?? []),
+        ];
         const allowedTools = applyToolDenylist(task.agent?.tools, excluded);
         const { session } = await createAgentSession({
           cwd: task.cwd,
@@ -250,8 +257,15 @@ const makePiSession = (
         // the scope finalizer that owns cleanup is only registered later.
         // Must precede bindExtensions: the child's own subagents extension
         // reads this back at session_start to learn how deep it is.
+        // Same for the child's permission mode: without it the child's own
+        // permissions extension would read the configured default and start
+        // gating a session that has no UI to answer with.
         if (session.sessionFile) {
           registerSessionDepth(session.sessionFile, childDepth);
+          registerChildPermissionMode(
+            session.sessionFile,
+            task.agent?.permissionMode ?? "bypassPermissions",
+          );
         }
         try {
           await session.bindExtensions({ mode: "print" });
