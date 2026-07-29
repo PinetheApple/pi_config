@@ -1,8 +1,9 @@
 /** All model-facing strings for the subagents tools. */
 
+import { MAX_RUNNING } from "./manager.ts";
+
 /** Describes subagent_spawn, including harnesses and the fixed concurrency cap. */
-export const SUBAGENT_SPAWN_TOOL_DESCRIPTION =
-  "Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. You choose the harness it runs on: pi (in-process pi session, inherits this environment's tools and config), claude (Claude Code), or codex (Codex CLI). Fire-and-forget: this returns immediately with an id. The subagent's final output is queued back to you as a message when it settles, or collect it explicitly with subagent_wait. Children cannot orchestrate more agents or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Max 4 subagents can be running at once across all harnesses.";
+export const SUBAGENT_SPAWN_TOOL_DESCRIPTION = `Spawn a background subagent: a fully autonomous, headless agent with its own context window and the selected harness's normal host permissions. You choose the harness it runs on: pi (in-process pi session, inherits this environment's tools and config), claude (Claude Code), or codex (Codex CLI). Fire-and-forget: this returns immediately with an id. The subagent's final output is queued back to you as a message when it settles, or collect it explicitly with subagent_wait. Children cannot orchestrate more agents or ask the user, and cannot see this conversation, so the prompt must be self-contained. Only use trusted working directories. Max ${MAX_RUNNING} subagents can be running at once across all harnesses.`;
 
 /**
  * Appends the agent catalog to the spawn tool description. One tool with an
@@ -32,9 +33,9 @@ export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
     "Task prompt for the subagent. Must be self-contained: include all needed context, file paths, and what to report back.",
   name: "Short human-readable name for this subagent, shown in listings and the UI",
   agent:
-    "Predefined agent to run this subagent as. Applies that agent's system prompt, tool restrictions, and default model. Omit for a general-purpose subagent.",
+    "Predefined agent to run this subagent as. Applies that agent's system prompt, tool restrictions, default harness, model and reasoning effort. Omit for a general-purpose subagent.",
   harness:
-    'Harness to run the subagent on: "pi" (in-process pi session; inherits this environment), "claude" (Claude Code), or "codex" (Codex CLI). Choose deliberately per task.',
+    'Harness to run the subagent on: "pi" (in-process pi session; inherits this environment), "claude" (Claude Code), or "codex" (Codex CLI). Omit to use the agent\'s own preferred harness, or "pi" when no agent is given; an agent that requires a specific harness overrides this.',
   workingDir:
     "Trusted working directory for the autonomous child (default: current working directory)",
   model:

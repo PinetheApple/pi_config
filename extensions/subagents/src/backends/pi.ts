@@ -26,10 +26,20 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
-import { applyToolDenylist } from "../agent-defs.ts";
+import { applyToolDenylist, resolveMcpTools } from "../agent-defs.ts";
 import type { SubagentBackend, SubagentSession } from "../backend.ts";
 import type { SpawnTask, SubagentEvent, SubagentMeta } from "../domain.ts";
-import { CHILD_EXCLUDED_TOOL_NAMES, SendError, SpawnError } from "../domain.ts";
+import {
+  CHILD_EXCLUDED_TOOL_NAMES,
+  excludedToolsAtDepth,
+  SendError,
+  SpawnError,
+} from "../domain.ts";
+import { registerChildPermissionMode } from "../../../shared/child-permission-mode.ts";
+import {
+  canSpawnAtDepth,
+  registerSessionDepth,
+} from "../../../shared/subagent-budget.ts";
 import {
   assistantParts,
   safeJson,
@@ -218,10 +228,17 @@ const makePiSession = (
           task.parent.projectTrusted,
           task.agent?.systemPrompt,
         );
-        const allowedTools = applyToolDenylist(
-          task.agent?.tools,
-          CHILD_EXCLUDED_TOOL_NAMES,
-        );
+        // A child one level below its parent. At the ceiling it keeps every
+        // tool except orchestration, so it can still do the work asked of it.
+        const childDepth = task.parent.depth + 1;
+        // A definition's `disallowedTools` joins the structural exclusions
+        // rather than only subtracting from `tools`: an agent may deny without
+        // allowlisting anything, and excludeTools is what makes that bite.
+        const excluded = [
+          ...excludedToolsAtDepth(canSpawnAtDepth(childDepth)),
+          ...(task.agent?.disallowedTools ?? []),
+        ];
+        const allowedTools = applyToolDenylist(task.agent?.tools, excluded);
         const { session } = await createAgentSession({
           cwd: task.cwd,
           sessionManager: SessionManager.create(task.cwd),
@@ -230,16 +247,49 @@ const makePiSession = (
           model,
           thinkingLevel,
           ...(allowedTools ? { tools: allowedTools } : {}),
-          excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
+          ...(task.customTools?.length
+            ? { customTools: [...task.customTools] }
+            : {}),
+          excludeTools: excluded,
         });
         // Start child extension session hooks/resources in headless mode.
         // A rejection here would otherwise leak the freshly created session:
         // the scope finalizer that owns cleanup is only registered later.
+        // Must precede bindExtensions: the child's own subagents extension
+        // reads this back at session_start to learn how deep it is.
+        // Same for the child's permission mode: without it the child's own
+        // permissions extension would read the configured default and start
+        // gating a session that has no UI to answer with.
+        if (session.sessionFile) {
+          registerSessionDepth(session.sessionFile, childDepth);
+          registerChildPermissionMode(
+            session.sessionFile,
+            task.agent?.permissionMode ?? "bypassPermissions",
+          );
+        }
         try {
           await session.bindExtensions({ mode: "print" });
         } catch (error) {
           await shutdownAndDisposeChildSession(session);
           throw error;
+        }
+        // MCP tool names depend on how pi-mcp-adapter is configured, and the
+        // adapter only registers them while binding, so `mcp__*` requests can
+        // only be resolved here — against the child's own inventory.
+        const deferred = task.agent?.deferredMcpTools;
+        if (allowedTools && deferred?.length) {
+          const available = new Set(
+            session.getAllTools().map((tool) => tool.name),
+          );
+          const resolved = deferred.flatMap((name) =>
+            resolveMcpTools(name, available),
+          );
+          const granted = applyToolDenylist(resolved, excluded);
+          if (granted?.length) {
+            session.setActiveToolsByName([
+              ...new Set([...allowedTools, ...granted]),
+            ]);
+          }
         }
         return session;
       },

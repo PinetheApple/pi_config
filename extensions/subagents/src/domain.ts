@@ -7,11 +7,18 @@
  * normalized `SubagentEvent` union.
  */
 
-import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type {
+  ModelRegistry,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { Data } from "effect";
+import type { PermissionMode } from "../../shared/permission-modes.ts";
 
 export const BACKEND_NAMES = ["pi", "claude", "codex"] as const;
 export type BackendName = (typeof BACKEND_NAMES)[number];
+
+/** Harness used when neither the caller nor the agent definition names one. */
+export const DEFAULT_HARNESS: BackendName = "pi";
 
 /** Who initiated the session. User asides stay out of model-facing tooling. */
 export type SubagentOrigin = "model" | "btw";
@@ -36,21 +43,44 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 export type SubagentStatus = "running" | "done" | "error";
 
 /**
- * Tools headless children must never receive, whatever an agent definition
- * asks for: orchestration stays with the parent and children cannot prompt
- * the user. Everything else stays enabled.
+ * Tools a headless child can never use, whatever an agent definition asks
+ * for: it has no UI to prompt through. Unconditional, at every depth.
  */
-export const CHILD_EXCLUDED_TOOL_NAMES = [
+export const HEADLESS_EXCLUDED_TOOL_NAMES = ["ask_user"] as const;
+
+/**
+ * Orchestration tools. Withheld only at the nesting ceiling, so the two
+ * exclusions no longer share one constant: one is about a missing UI, the
+ * other about bounding the tree.
+ */
+export const ORCHESTRATION_TOOL_NAMES = [
   "subagent_spawn",
   "subagent_wait",
   "subagent_cancel",
   "subagent_check",
   "subagent_list",
-  "ask_user",
 ] as const;
+
+/** Everything a child at the depth ceiling is denied. */
+export const CHILD_EXCLUDED_TOOL_NAMES = [
+  ...ORCHESTRATION_TOOL_NAMES,
+  ...HEADLESS_EXCLUDED_TOOL_NAMES,
+] as const;
+
+/** What a child at `depth` may not use. */
+export function excludedToolsAtDepth(canOrchestrate: boolean) {
+  return canOrchestrate
+    ? [...HEADLESS_EXCLUDED_TOOL_NAMES]
+    : [...CHILD_EXCLUDED_TOOL_NAMES];
+}
 
 /** Parent-session context resolved by the tool layer and passed opaquely. */
 export interface ParentContext {
+  /**
+   * Nesting depth of the spawning session: 0 for the root pi session, 1 for a
+   * subagent of it, and so on. Children are spawned at `depth + 1`.
+   */
+  readonly depth: number;
   readonly parentCwd: string;
   readonly projectTrusted: boolean;
   /** Parent pi model, for the pi backend's "inherit" default. */
@@ -71,8 +101,23 @@ export interface AgentSpec {
   readonly systemPrompt: string;
   /** Allowlist; omitted = the harness default set. */
   readonly tools?: readonly string[];
+  /**
+   * Denylist in the target harness's vocabulary. Carried separately from
+   * `tools` because a definition may deny without allowlisting anything, and
+   * subtracting from an absent allowlist would silently deny nothing.
+   */
+  readonly disallowedTools?: readonly string[];
+  /** Mode this child is pinned to; already narrowed against the session's. */
+  readonly permissionMode?: PermissionMode;
+  /**
+   * Claude `mcp__*` names still to be matched against the child's own tool
+   * inventory, which only exists once the child has bound its extensions.
+   */
+  readonly deferredMcpTools?: readonly string[];
   /** Model hint; omitted = the harness default. */
   readonly model?: string;
+  /** Declared default effort; an explicit spawn argument outranks it. */
+  readonly reasoningEffort?: ReasoningEffort;
 }
 
 export interface SpawnTask {
@@ -91,6 +136,11 @@ export interface SpawnTask {
   readonly reasoningEffort?: ReasoningEffort;
   /** Persona this child runs as: system prompt, tool allowlist, model. */
   readonly agent?: AgentSpec;
+  /**
+   * Extra in-process tools only this child can call. Used by the workflow
+   * transport to inject `workflow_result`; empty for tool-driven spawns.
+   */
+  readonly customTools?: ReadonlyArray<ToolDefinition>;
   readonly parent: ParentContext;
 }
 

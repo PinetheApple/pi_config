@@ -4,7 +4,7 @@
  *
  * Tools (for the parent LLM):
  * - subagent_spawn: fire-and-forget spawn (prompt, title, agent, working_dir,
- *   model, reasoning_effort). Max 4 running at once across all backends.
+ *   model, reasoning_effort). Capped at MAX_RUNNING running at once.
  * - subagent_wait: block until the listed subagents settle, return results.
  * - subagent_cancel: stop one or more running subagents.
  * - subagent_check: peek at a subagent's status and recent activity.
@@ -37,7 +37,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatAgentCatalog, loadAgentDefinitions } from "./src/agent-defs.ts";
+import {
+  type AgentDefinition,
+  formatAgentCatalog,
+  loadSessionAgentDefinitions,
+} from "./src/agent-defs.ts";
 import { deriveBtwTitle, isModelVisible } from "./src/by-the-way.ts";
 import {
   BACKEND_NAMES,
@@ -89,6 +93,17 @@ import {
   SPAWN_COMMAND_USAGE,
 } from "./src/spawn-command.ts";
 import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
+import {
+  clearSubagentHost,
+  publishSubagentHost,
+  type SubagentHost,
+} from "../shared/subagent-host.ts";
+import {
+  canSpawnAtDepth,
+  MAX_SPAWN_DEPTH,
+  sessionDepth,
+} from "../shared/subagent-budget.ts";
+import { createSubagentTransport } from "./src/workflow-transport.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 /** Records live in the parent session file forever; keep them small. */
@@ -140,17 +155,16 @@ export default function (pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
-  // Read once: the tool schema below bakes the agent names in, so picking up
-  // an edited definition needs a /reload anyway.
-  const agentDefinitions = loadAgentDefinitions();
-  const agentNames = agentDefinitions.map((def) => def.name);
-  const agentDescription = {
-    description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.agent,
-  };
-  const agentParameter =
-    agentNames.length > 0
-      ? StringEnum(agentNames, agentDescription)
-      : Type.String(agentDescription);
+  // Loaded in session_start, where the session cwd and the project's trust
+  // decision are both known. Empty until then.
+  let agentDefinitions: readonly AgentDefinition[] = [];
+
+  /**
+   * A session at the ceiling still loads this extension, so the tools exist
+   * but must refuse. Saying why beats an unexplained "unknown tool".
+   */
+  const depthRefusal = () =>
+    `Nesting limit reached: this subagent is ${MAX_SPAWN_DEPTH} levels deep, which is the maximum. Do this work yourself instead of delegating it.`;
   const recordWriter = createRecordWriter({
     append: (record) =>
       pi.appendEntry<SubagentRecord>(SUBAGENT_RECORD_TYPE, record),
@@ -286,9 +300,33 @@ export default function (pi: ExtensionAPI) {
     await runTool(getRuntime(), manager.adopt(records));
   };
 
+  // Sibling extensions (the workflow host) drive subagents through this
+  // handle, so every child lands in the one pool MAX_RUNNING governs.
+  let ownDepth = 0;
+
+  const host: SubagentHost = {
+    workflowTransport: async (request) =>
+      createSubagentTransport({
+        runtime: getRuntime(),
+        manager: await getManager(),
+        parent: request.parent,
+        thinkingLevel: request.thinkingLevel ?? pi.getThinkingLevel(),
+        sessionDepth: ownDepth,
+      }),
+  };
+
   pi.on("session_start", async (event, ctx) => {
     sessionContext = ctx;
+    // A headless child is itself a pi session; the parent recorded how deep
+    // it sits against its session file before binding extensions.
+    ownDepth = sessionDepth(ctx.sessionManager.getSessionFile());
+    publishSubagentHost(host);
     if (ctx.hasUI) ui = ctx.ui;
+    agentDefinitions = loadSessionAgentDefinitions({
+      cwd: ctx.cwd,
+      projectTrusted: ctx.isProjectTrusted(),
+    });
+    registerSpawnTool();
     if (!RESTORING_REASONS.has(event.reason)) return;
     try {
       await restoreSubagents(ctx);
@@ -305,6 +343,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     sessionContext = undefined;
+    clearSubagentHost(host);
     resultDelivery.clear();
     recordWriter.clear();
     unsubStatus?.();
@@ -321,96 +360,119 @@ export default function (pi: ExtensionAPI) {
 
   // --- Tools -------------------------------------------------------------
 
-  pi.registerTool({
-    name: "subagent_spawn",
-    label: "Spawn Subagent",
-    description: buildSubagentSpawnToolDescription(
-      formatAgentCatalog(agentDefinitions),
-    ),
-    promptSnippet: SUBAGENT_SPAWN_PROMPT_SNIPPET,
-    promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
-    parameters: Type.Object({
-      prompt: Type.String({
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
-      }),
-      name: Type.String({
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
-      }),
-      agent: Type.Optional(agentParameter),
-      harness: StringEnum(BACKEND_NAMES, {
-        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
-      }),
-      working_dir: Type.Optional(
-        Type.String({
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
-        }),
-      ),
-      model: Type.Optional(
-        Type.String({
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.model,
-        }),
-      ),
-      reasoning_effort: Type.Optional(
-        StringEnum(REASONING_EFFORTS, {
-          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.reasoningEffort,
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const manager = await getManager();
-      const harness = params.harness;
+  /**
+   * Registered from session_start rather than at load: the agent enum and
+   * catalog are baked into the schema, and both depend on the session cwd and
+   * its trust decision. Re-registering replaces the previous definition.
+   */
+  const registerSpawnTool = () => {
+    const agentDescription = {
+      description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.agent,
+    };
+    const agentNames = agentDefinitions.map((def) => def.name);
+    const agentParameter =
+      agentNames.length > 0
+        ? StringEnum(agentNames, agentDescription)
+        : Type.String(agentDescription);
 
-      const {
-        snapshot: snap,
-        task,
-        warnings,
-      } = await spawnSubagent({
-        runtime: getRuntime(),
-        manager,
-        harness,
-        request: {
-          prompt: params.prompt,
-          title: params.name,
-          workingDir: params.working_dir,
-          model: params.model,
-          reasoningEffort: params.reasoning_effort,
-        },
-        agentName: params.agent,
-        agentDefinitions,
-        ctx,
-        thinkingLevel: pi.getThinkingLevel(),
-        signal,
-        interruptMessage: "Subagent spawn aborted.",
-      });
-      const cwd = task.cwd;
-      for (const warning of warnings) ui?.notify(warning, "warning");
+    pi.registerTool({
+      name: "subagent_spawn",
+      label: "Spawn Subagent",
+      description: buildSubagentSpawnToolDescription(
+        formatAgentCatalog(agentDefinitions),
+      ),
+      promptSnippet: SUBAGENT_SPAWN_PROMPT_SNIPPET,
+      promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
+      parameters: Type.Object({
+        prompt: Type.String({
+          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
+        }),
+        name: Type.String({
+          description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
+        }),
+        agent: Type.Optional(agentParameter),
+        harness: Type.Optional(
+          StringEnum(BACKEND_NAMES, {
+            description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
+          }),
+        ),
+        working_dir: Type.Optional(
+          Type.String({
+            description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.workingDir,
+          }),
+        ),
+        model: Type.Optional(
+          Type.String({
+            description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.model,
+          }),
+        ),
+        reasoning_effort: Type.Optional(
+          StringEnum(REASONING_EFFORTS, {
+            description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.reasoningEffort,
+          }),
+        ),
+      }),
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        if (!canSpawnAtDepth(ownDepth)) throw new Error(depthRefusal());
+        const manager = await getManager();
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: buildSubagentSpawnResult({
-              id: snap.id,
-              title: snap.title,
-              harness,
-              modelLabel: snap.meta.modelLabel ?? "?",
-              cwd,
-              agent: params.agent,
-              warnings,
-            }),
-          },
-        ],
-        details: {
-          id: snap.id,
-          title: snap.title,
-          cwd,
+        // The effective harness can differ from the requested one: with no
+        // argument the agent definition's `prefer` picks it, and its `require`
+        // overrides an explicit choice.
+        const {
+          snapshot: snap,
+          task,
           harness,
-          agent: params.agent,
-          model: snap.meta.modelLabel,
-        },
-      };
-    },
-  });
+          warnings,
+        } = await spawnSubagent({
+          runtime: getRuntime(),
+          manager,
+          harness: params.harness,
+          request: {
+            prompt: params.prompt,
+            title: params.name,
+            workingDir: params.working_dir,
+            model: params.model,
+            reasoningEffort: params.reasoning_effort,
+          },
+          agentName: params.agent,
+          agentDefinitions,
+          ctx,
+          thinkingLevel: pi.getThinkingLevel(),
+          sessionDepth: ownDepth,
+          signal,
+          interruptMessage: "Subagent spawn aborted.",
+        });
+        const cwd = task.cwd;
+        for (const warning of warnings) ui?.notify(warning, "warning");
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: buildSubagentSpawnResult({
+                id: snap.id,
+                title: snap.title,
+                harness,
+                modelLabel: snap.meta.modelLabel ?? "?",
+                cwd,
+                agent: params.agent,
+                warnings,
+              }),
+            },
+          ],
+          details: {
+            id: snap.id,
+            title: snap.title,
+            cwd,
+            harness,
+            agent: params.agent,
+            model: snap.meta.modelLabel,
+          },
+        };
+      },
+    });
+  };
 
   pi.registerTool({
     name: "subagent_wait",
@@ -749,6 +811,7 @@ export default function (pi: ExtensionAPI) {
           title: deriveBtwTitle(prompt),
           cwd: ctx.cwd,
           parent: {
+            depth: ownDepth,
             parentCwd: ctx.cwd,
             projectTrusted: ctx.isProjectTrusted(),
             inheritedModel: ctx.model
@@ -787,6 +850,7 @@ export default function (pi: ExtensionAPI) {
         manager: await getManager(),
         runtime: getRuntime(),
         thinkingLevel: pi.getThinkingLevel(),
+        sessionDepth: ownDepth,
         agentDefinitions,
       }),
   });
