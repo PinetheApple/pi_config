@@ -34,6 +34,35 @@ import type {
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
 
+/**
+ * Everything about a child's reach, split out from the `query()` call so it can
+ * be asserted on without a Claude CLI on the machine.
+ *
+ * `Agent` and `Task` are denied unconditionally and must stay that way: Claude's
+ * native subagents would spawn grandchildren that `SubagentManager` never sees,
+ * escaping both `MAX_SPAWN_DEPTH` and the process-wide `MAX_TOTAL_RUNNING`.
+ *
+ * A silent agent definition keeps `bypassPermissions` — headless children cannot
+ * answer an approval prompt, and changing that would break every existing spawn.
+ * A definition that names a `permissionMode` has opted into something stricter,
+ * and only then does the dangerous-skip flag come off.
+ */
+export function claudePermissionOptions(task: SpawnTask) {
+  const permissionMode = task.agent?.permissionMode ?? "bypassPermissions";
+  return {
+    permissionMode,
+    ...(permissionMode === "bypassPermissions"
+      ? { allowDangerouslySkipPermissions: true }
+      : {}),
+    disallowedTools: ["Agent", "Task", ...(task.agent?.disallowedTools ?? [])],
+    // For cwds pi marked untrusted, restrict to user-level settings so an
+    // untrusted project's config cannot reconfigure the child.
+    ...(task.parent.projectTrusted
+      ? {}
+      : { settingSources: ["user" as const] }),
+  };
+}
+
 const CLAUDE_CONTEXT_WINDOW = 200_000;
 const INTERRUPT_TIMEOUT_MS = 2_000;
 const PREVIEW_MAX_LENGTH = 4_096;
@@ -327,19 +356,7 @@ const makeClaudeSession = (
           prompt: input,
           options: {
             cwd: task.cwd,
-            // Headless children cannot answer approval prompts. The caller
-            // already chose to launch an autonomous subagent, so let it use
-            // its tools without interactive permission checks.
-            permissionMode: "bypassPermissions",
-            allowDangerouslySkipPermissions: true,
-            // Keep child orchestration inside this extension's global manager
-            // and concurrency cap rather than Claude Code's native subagents.
-            disallowedTools: ["Agent", "Task"],
-            // For cwds pi marked untrusted, restrict to user-level settings so
-            // an untrusted project's config cannot reconfigure the child.
-            ...(task.parent.projectTrusted
-              ? {}
-              : { settingSources: ["user" as const] }),
+            ...claudePermissionOptions(task),
             includePartialMessages: true,
             abortController,
             ...(claudeBinary

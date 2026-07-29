@@ -12,6 +12,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Data } from "effect";
+import type { PermissionMode } from "../../shared/permission-modes.ts";
 
 export const BACKEND_NAMES = ["pi", "claude", "codex"] as const;
 export type BackendName = (typeof BACKEND_NAMES)[number];
@@ -100,6 +101,14 @@ export interface AgentSpec {
   readonly systemPrompt: string;
   /** Allowlist; omitted = the harness default set. */
   readonly tools?: readonly string[];
+  /**
+   * Denylist in the target harness's vocabulary. Carried separately from
+   * `tools` because a definition may deny without allowlisting anything, and
+   * subtracting from an absent allowlist would silently deny nothing.
+   */
+  readonly disallowedTools?: readonly string[];
+  /** Mode this child is pinned to; already narrowed against the session's. */
+  readonly permissionMode?: PermissionMode;
   /**
    * Claude `mcp__*` names still to be matched against the child's own tool
    * inventory, which only exists once the child has bound its extensions.

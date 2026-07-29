@@ -1061,3 +1061,124 @@ test("an empty harness block is the same as none", () => {
   assert.equal(definition.harness, undefined);
   assert.equal(definition.model, "sonnet");
 });
+
+// --- per-agent permissions --------------------------------------------------
+
+const GATED = `---
+name: gated
+description: A tightly scoped agent.
+tools: Read, Edit, Bash, Grep
+disallowedTools: Bash, Grep
+permissionMode: plan
+---
+
+Body.
+`;
+
+test("permissionMode and disallowedTools are parsed out of frontmatter", () => {
+  const definition = writeAgent(fixtureDir(), "gated.md", GATED);
+  assert.equal(definition.permissionMode, "plan");
+  assert.deepEqual(definition.disallowedTools, ["Bash", "Grep"]);
+});
+
+test("an unknown permissionMode lands on the strictest mode, not the loosest", () => {
+  const definition = writeAgent(
+    fixtureDir(),
+    "bad-mode.md",
+    "---\nname: bad-mode\ndescription: d\npermissionMode: yolo\n---\n\nBody.\n",
+  );
+  // Dropping it would mean "unset", and unset means bypassPermissions.
+  assert.equal(definition.permissionMode, "plan");
+  const { spec, warnings } = resolveAgentForHarness({
+    definition,
+    harness: "pi",
+  });
+  assert.equal(spec.permissionMode, "plan");
+  assert.ok(
+    warnings.some((warning) =>
+      warning.includes('unknown permissionMode "yolo"'),
+    ),
+  );
+});
+
+test("disallowedTools subtracts from tools on the pi harness, through the name mapping", () => {
+  const definition = writeAgent(fixtureDir(), "gated.md", GATED);
+  const { spec } = resolveAgentForHarness({ definition, harness: "pi" });
+  // Read/Edit survive; Bash and Grep (both grep and rg) are gone.
+  assert.deepEqual([...(spec.tools ?? [])].sort(), ["edit", "read"]);
+  assert.ok(spec.disallowedTools?.includes("bash"));
+  assert.ok(spec.disallowedTools?.includes("grep"));
+  assert.ok(spec.disallowedTools?.includes("rg"));
+});
+
+test("disallowedTools is carried even when the definition has no tools allowlist", () => {
+  const definition = writeAgent(
+    fixtureDir(),
+    "deny-only.md",
+    "---\nname: deny-only\ndescription: d\ndisallowedTools: Bash\n---\n\nBody.\n",
+  );
+  assert.equal(definition.tools, undefined);
+  const { spec } = resolveAgentForHarness({ definition, harness: "pi" });
+  assert.equal(spec.tools, undefined);
+  assert.deepEqual(spec.disallowedTools, ["bash"]);
+});
+
+test("disallowedTools subtracts on the claude harness in Claude's own vocabulary", () => {
+  const definition = writeAgent(fixtureDir(), "gated.md", GATED);
+  const { spec } = resolveAgentForHarness({ definition, harness: "claude" });
+  assert.deepEqual(spec.tools, ["Read", "Edit"]);
+  assert.deepEqual(spec.disallowedTools, ["Bash", "Grep"]);
+});
+
+test("a silent definition still resolves to bypassPermissions", () => {
+  const definition = parse(fixtureDir(), "design-reviewer.md")!;
+  assert.equal(definition.permissionMode, undefined);
+  for (const harness of ["pi", "claude", "codex"] as const) {
+    const { spec } = resolveAgentForHarness({
+      definition,
+      harness,
+      sessionPermissionMode: "plan",
+    });
+    assert.equal(spec.permissionMode, "bypassPermissions", harness);
+  }
+});
+
+test("an explicit permissionMode is narrowed by the session but never widened", () => {
+  const definition = writeAgent(fixtureDir(), "gated.md", GATED);
+  // Definition is stricter than the session: the definition wins.
+  assert.equal(
+    resolveAgentForHarness({
+      definition,
+      harness: "pi",
+      sessionPermissionMode: "bypassPermissions",
+    }).spec.permissionMode,
+    "plan",
+  );
+  // Session is stricter than the definition: the session wins.
+  const loose = writeAgent(
+    fixtureDir(),
+    "loose.md",
+    "---\nname: loose\ndescription: d\npermissionMode: bypassPermissions\n---\n\nBody.\n",
+  );
+  assert.equal(
+    resolveAgentForHarness({
+      definition: loose,
+      harness: "pi",
+      sessionPermissionMode: "plan",
+    }).spec.permissionMode,
+    "plan",
+  );
+});
+
+test("codex reports that it cannot honour a denylist rather than dropping it silently", () => {
+  const definition = writeAgent(
+    fixtureDir(),
+    "deny-only.md",
+    "---\nname: deny-only\ndescription: d\ndisallowedTools: Bash\n---\n\nBody.\n",
+  );
+  const { warnings } = resolveAgentForHarness({ definition, harness: "codex" });
+  assert.ok(
+    warnings.some((w) => w.includes("tool restrictions are not supported")),
+    warnings.join("; "),
+  );
+});

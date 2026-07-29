@@ -17,6 +17,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import {
+  claudeToolToPiTools,
+  CLAUDE_TO_PI_TOOLS,
+  MCP_TOOL_PREFIX,
+} from "../../shared/claude-tool-names.ts";
+import {
+  effectiveAgentMode,
+  isPermissionMode,
+  STRICTEST_PERMISSION_MODE,
+  type PermissionMode,
+} from "../../shared/permission-modes.ts";
 import { projectConfigDirs } from "../../shared/project-config-roots.ts";
 import {
   BACKEND_NAMES,
@@ -66,6 +77,15 @@ export interface AgentDefinition {
   readonly systemPrompt: string;
   /** Raw Claude tool names. Undefined = inherit everything. */
   readonly tools?: readonly string[];
+  /** Raw Claude tool names subtracted from `tools` (and from the harness default). */
+  readonly disallowedTools?: readonly string[];
+  /**
+   * Explicit mode for children of this agent. Undefined keeps the long-standing
+   * `bypassPermissions` default; see `effectiveAgentMode`.
+   */
+  readonly permissionMode?: PermissionMode;
+  /** Problems found parsing the frontmatter itself, surfaced on resolution. */
+  readonly warnings?: readonly string[];
   /** Raw Claude model alias or id. Undefined = harness default. */
   readonly model?: string;
   /** Per-harness overrides from the `harness:` block, when it has any. */
@@ -124,6 +144,30 @@ function parseFrontmatter(block: string) {
     blocks.set(key, indented);
   }
   return { fields, blocks };
+}
+
+/**
+ * An unrecognised mode lands on the strictest mode, with a warning — it is
+ * never dropped.
+ *
+ * Dropping it looks conservative and is the opposite: an absent
+ * `permissionMode` means `bypassPermissions` by design (see
+ * `effectiveAgentMode`), so treating `permissionMode: yolo` as "unset" would
+ * silently promote a typo to the *loosest* mode in the set. The author asked
+ * for something specific and we could not tell what, which is the one case
+ * where guessing must go tight rather than convenient.
+ */
+function parsePermissionMode(raw: string | undefined): {
+  readonly mode?: PermissionMode;
+  readonly warning?: string;
+} {
+  const value = raw?.trim();
+  if (!value) return {};
+  if (isPermissionMode(value)) return { mode: value };
+  return {
+    mode: STRICTEST_PERMISSION_MODE,
+    warning: `unknown permissionMode "${value}"; falling back to "${STRICTEST_PERMISSION_MODE}"`,
+  };
 }
 
 /** Both `Read, Edit` and `["Read", "Edit"]` occur in the wild; accept either. */
@@ -312,6 +356,7 @@ export function parseAgentDefinition(options: {
     path.basename(options.sourcePath, AGENT_FILE_EXTENSION);
   const body = match[2].trim();
   if (!body) return undefined;
+  const permission = parsePermissionMode(fields.get("permissionMode"));
   return {
     name,
     description: boundDescription(fields.get("description") ?? ""),
@@ -320,6 +365,9 @@ export function parseAgentDefinition(options: {
       ...(options.fragmentFallbackDirs ?? []),
     ]),
     tools: parseToolList(fields.get("tools")),
+    disallowedTools: parseToolList(fields.get("disallowedTools")),
+    permissionMode: permission.mode,
+    warnings: permission.warning ? [permission.warning] : undefined,
     model: fields.get("model") || undefined,
     harness: parseHarnessConfig(blocks.get("harness") ?? []),
     sourcePath: options.sourcePath,
@@ -397,29 +445,12 @@ export function loadSessionAgentDefinitions(options: {
 
 // --- Tool mapping -------------------------------------------------------------
 
-/**
- * Claude tool name -> pi tool names. One Claude tool can cover several pi
- * tools (Claude's Glob spans pi's find/fd/ls), so entries are lists.
- */
-const CLAUDE_TO_PI_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  Read: ["read"],
-  Write: ["write"],
-  Edit: ["edit"],
-  MultiEdit: ["edit"],
-  Bash: ["bash"],
-  Grep: ["grep", "rg"],
-  Glob: ["find", "fd", "ls"],
-  WebSearch: ["web_search"],
-  WebFetch: ["web_fetch"],
-};
-
 /** Tools deliberately refused, with the reason shown to the user. */
 const REFUSED_CLAUDE_TOOLS: Readonly<Record<string, string>> = {
   Task: "subagents cannot spawn further subagents",
   Agent: "subagents cannot spawn further subagents",
 };
 
-const MCP_TOOL_PREFIX = "mcp__";
 /** The one tool `pi-mcp-adapter` always registers: a gateway over every server. */
 const MCP_PROXY_TOOL = "mcp";
 
@@ -637,26 +668,41 @@ export function resolveAgentForHarness(options: {
   readonly registry?: Pick<ModelRegistry, "getAll">;
   readonly provider?: string;
   readonly toolDenylist?: readonly string[];
+  /** Ceiling for the child's mode; a silent definition ignores it by design. */
+  readonly sessionPermissionMode?: PermissionMode;
 }): AgentResolution {
   const { definition, harness } = options;
   const override = definition.harness?.overrides[harness];
-  const blockWarnings = (definition.harness?.warnings ?? []).map(
-    (warning) => `agent "${definition.name}": ${warning}`,
-  );
+  const blockWarnings = [
+    ...(definition.warnings ?? []),
+    ...(definition.harness?.warnings ?? []),
+  ].map((warning) => `agent "${definition.name}": ${warning}`);
   const base = {
     name: definition.name,
     description: definition.description,
     systemPrompt: definition.systemPrompt,
     reasoningEffort: override?.effort,
+    permissionMode: effectiveAgentMode({
+      sessionMode: options.sessionPermissionMode,
+      definitionMode: definition.permissionMode,
+    }),
   };
+  const declaredDenied = definition.disallowedTools ?? [];
 
   if (harness === "claude") {
     const refused = Object.keys(REFUSED_CLAUDE_TOOLS);
-    const tools = applyToolDenylist(definition.tools, refused);
+    const tools = applyToolDenylist(definition.tools, [
+      ...refused,
+      ...declaredDenied,
+    ]);
     return {
       spec: {
         ...base,
         tools,
+        // Claude speaks these names natively, so they pass through untranslated.
+        ...(declaredDenied.length > 0
+          ? { disallowedTools: [...declaredDenied] }
+          : {}),
         model: override?.model ?? declaredModel(definition),
       },
       warnings: [
@@ -673,7 +719,7 @@ export function resolveAgentForHarness(options: {
 
   if (harness === "codex") {
     const warnings = [...blockWarnings];
-    if (definition.tools) {
+    if (definition.tools || declaredDenied.length > 0) {
       warnings.push(
         `agent "${definition.name}": tool restrictions are not supported on the codex harness`,
       );
@@ -688,6 +734,13 @@ export function resolveAgentForHarness(options: {
   }
 
   const mapped = mapClaudeToolsToPi(definition.tools, definition.name);
+  // Denied names go through the same table as allowed ones, so `Grep` denies
+  // both `grep` and `rg` rather than only the name that happens to be spelled
+  // the same. Unmappable names are dropped here without a warning: they are
+  // already absent from pi, so denying them is a no-op either way.
+  const deniedForPi = declaredDenied.flatMap(
+    (tool) => claudeToolToPiTools(tool) ?? [tool],
+  );
   const model = override?.model
     ? { model: override.model }
     : resolvePiModelAlias({
@@ -699,7 +752,11 @@ export function resolveAgentForHarness(options: {
   return {
     spec: {
       ...base,
-      tools: applyToolDenylist(mapped.tools, options.toolDenylist ?? []),
+      tools: applyToolDenylist(mapped.tools, [
+        ...(options.toolDenylist ?? []),
+        ...deniedForPi,
+      ]),
+      ...(deniedForPi.length > 0 ? { disallowedTools: deniedForPi } : {}),
       ...(mapped.deferredMcpTools
         ? { deferredMcpTools: mapped.deferredMcpTools }
         : {}),
