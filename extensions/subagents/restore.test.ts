@@ -14,7 +14,7 @@ import test from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SubagentSnapshot } from "./src/domain.ts";
-import { MAX_TRACKED } from "./src/manager.ts";
+import { MAX_RUNNING, MAX_TRACKED } from "./src/manager.ts";
 import {
   buildSubagentRecord,
   collectSubagentRecords,
@@ -24,7 +24,7 @@ import {
 } from "./src/record.ts";
 import { loadRestoredTranscript } from "./src/restore-transcript.ts";
 import { runTool } from "./src/runtime.ts";
-import { task, withManager } from "./test-harness.ts";
+import { capMessage, task, withManager } from "./test-harness.ts";
 
 let entrySeq = 0;
 
@@ -365,13 +365,13 @@ test("restored entries do not consume running slots", async () => {
         Array.from({ length: 8 }, (_, i) => record({ id: `sa-${i + 1}` })),
       ),
     );
-    // MAX_RUNNING is 4; if restored entries counted, this would reject.
-    for (let i = 0; i < 4; i++) {
+    // If restored entries counted against the cap, this would reject.
+    for (let i = 0; i < MAX_RUNNING; i++) {
       await runTool(runtime, manager.spawn("codex", task(`Task ${i}`)));
     }
     await assert.rejects(
       runTool(runtime, manager.spawn("codex", task("fifth"))),
-      /Max 4 subagents/,
+      capMessage,
     );
   });
 });
