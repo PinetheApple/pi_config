@@ -20,14 +20,23 @@ import {
   isGitInfoState,
   isModelInfoState,
 } from "../shared/dashboard-state.ts";
-import { composeStatusLine, STATUS_ELLIPSIS } from "./src/status-line.ts";
+import {
+  findSection,
+  isBlank,
+  type RenderableNode,
+} from "./src/component-tree.ts";
+import {
+  createStartupStatusSection,
+  installStartupStatusSection,
+  type StartupStatusSource,
+} from "./src/startup-status.ts";
+import {
+  composeStatusLine,
+  selectFooterStatuses,
+  STATUS_ELLIPSIS,
+} from "./src/status-line.ts";
 
 type Rgb = [number, number, number];
-interface RenderableNode {
-  children?: RenderableNode[];
-  invalidate(): void;
-  render(width: number): string[];
-}
 
 interface DashboardTui extends RenderableNode {
   requestRender(force?: boolean): void;
@@ -51,8 +60,6 @@ const TITLE_LINES = [
   "  ██║      ██║ ",
   "  ╚═╝      ╚═╝ ",
 ];
-const ANSI_PATTERN =
-  /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 // eslint-disable-next-line no-control-regex
 const OSC_PATTERN =
   /(?:\u001b\]|\u009d)(?:[^\u0007\u001b\u009c]|\u001b(?!\\))*(?:\u0007|\u001b\\|\u009c)/g;
@@ -106,45 +113,18 @@ function gradientText(text: string, phase: number) {
     .join("");
 }
 
-function hasChildren(
-  component: RenderableNode,
-): component is RenderableNode & { children: RenderableNode[] } {
-  return Array.isArray(component.children);
-}
+/** Settle window (ms) covering banner rebuilds and late-arriving statuses. */
+const STARTUP_SYNC_DELAYS = [0, 50, 250, 1_000, 3_000, 6_000];
 
-function renderedText(component: RenderableNode) {
-  try {
-    return component.render(200).join("\n").replace(ANSI_PATTERN, "");
-  } catch {
-    return "";
-  }
-}
+function hideThemesSection(root: RenderableNode) {
+  const section = findSection(root, "[Themes]");
+  if (!section) return false;
 
-function hideThemesSection(component: RenderableNode) {
-  if (!hasChildren(component)) return false;
-
-  for (let index = 0; index < component.children.length; index += 1) {
-    const child = component.children[index]!;
-    const firstLine = renderedText(child)
-      .split("\n")
-      .find((line) => line.trim())
-      ?.trim();
-
-    if (firstLine === "[Themes]") {
-      const removeCount =
-        component.children[index + 1] &&
-        renderedText(component.children[index + 1]!).trim() === ""
-          ? 2
-          : 1;
-      component.children.splice(index, removeCount);
-      component.invalidate();
-      return true;
-    }
-
-    if (hideThemesSection(child)) return true;
-  }
-
-  return false;
+  const { container, index } = section;
+  const next = container.children[index + 1];
+  container.children.splice(index, next && isBlank(next) ? 2 : 1);
+  container.invalidate();
+  return true;
 }
 
 function formatTokens(tokens: number) {
@@ -191,7 +171,9 @@ export default function uiCustomization(pi: ExtensionAPI) {
   let gitInfo = emptyGitInfoState();
   let requestRender: (() => void) | undefined;
   let activeTui: DashboardTui | undefined;
-  let themeRemovalTimers: Array<ReturnType<typeof setTimeout>> = [];
+  let startupSyncTimers: Array<ReturnType<typeof setTimeout>> = [];
+  let footerSource: StartupStatusSource | undefined;
+  const startupStatusSection = createStartupStatusSection(() => footerSource);
 
   const stopModelListener = pi.events.on(MODEL_INFO_CHANNEL, (value) => {
     if (!isModelInfoState(value)) return;
@@ -205,14 +187,23 @@ export default function uiCustomization(pi: ExtensionAPI) {
     requestRender?.();
   });
 
-  function scheduleThemeRemoval(tui: DashboardTui) {
-    for (const timer of themeRemovalTimers) clearTimeout(timer);
-    themeRemovalTimers = [];
+  /**
+   * pi rebuilds the startup banner asynchronously and extensions report their
+   * status later still (the MCP adapter only reports once its servers connect),
+   * so re-apply our banner edits over a settle window and force a repaint each
+   * time. The status section reads statuses lazily, so a repaint is all a late
+   * status needs to become visible.
+   */
+  function scheduleStartupSync(tui: DashboardTui) {
+    for (const timer of startupSyncTimers) clearTimeout(timer);
+    startupSyncTimers = [];
 
-    for (const delay of [0, 50, 250, 1_000]) {
-      themeRemovalTimers.push(
+    for (const delay of STARTUP_SYNC_DELAYS) {
+      startupSyncTimers.push(
         setTimeout(() => {
-          if (hideThemesSection(tui)) tui.requestRender(true);
+          hideThemesSection(tui);
+          installStartupStatusSection(tui, startupStatusSection);
+          tui.requestRender(true);
         }, delay),
       );
     }
@@ -224,7 +215,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
     ctx.ui.setHeader((tui) => {
       activeTui = tui;
       requestRender = () => tui.requestRender();
-      scheduleThemeRemoval(tui);
+      scheduleStartupSync(tui);
 
       return {
         render(width: number) {
@@ -243,6 +234,10 @@ export default function uiCustomization(pi: ExtensionAPI) {
 
     ctx.ui.setFooter((tui, theme, footerData: ReadonlyFooterDataProvider) => {
       requestRender = () => tui.requestRender();
+      footerSource = {
+        getStatuses: () => footerData.getExtensionStatuses(),
+        theme,
+      };
 
       return {
         invalidate() {},
@@ -284,7 +279,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
           ];
 
           const statusLine = composeStatusLine(
-            footerData.getExtensionStatuses(),
+            selectFooterStatuses(footerData.getExtensionStatuses()),
             width,
             theme.fg("dim", STATUS_ELLIPSIS),
           );
@@ -307,16 +302,17 @@ export default function uiCustomization(pi: ExtensionAPI) {
   });
 
   pi.on("resources_discover", () => {
-    if (activeTui) scheduleThemeRemoval(activeTui);
+    if (activeTui) scheduleStartupSync(activeTui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     stopModelListener();
     stopGitListener();
-    for (const timer of themeRemovalTimers) clearTimeout(timer);
-    themeRemovalTimers = [];
+    for (const timer of startupSyncTimers) clearTimeout(timer);
+    startupSyncTimers = [];
     activeTui = undefined;
     requestRender = undefined;
+    footerSource = undefined;
     if (ctx.mode === "tui") {
       ctx.ui.setHeader(undefined);
       ctx.ui.setFooter(undefined);

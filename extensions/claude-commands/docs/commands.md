@@ -5,7 +5,7 @@ Claude Code slash commands that pi does not already ship. Nothing here duplicate
 | Command | Behavior |
 | --- | --- |
 | `/help` | Lists the extension, prompt, and skill commands `pi.getCommands()` can see. |
-| `/context` | Context-window breakdown for the session. |
+| `/context` | What occupies the context window, in a dismissable overlay. |
 | `/status` | Environment, session, and provider auth state. |
 | `/usage` | Token usage and plan quota, in a dismissable overlay. |
 | `/clear` | Alias for `/new`, via `ctx.newSession()`. |
@@ -20,9 +20,34 @@ method, and reimplementing their selectors would mean rebuilding state pi does n
 Prefilling the editor was tried and rejected — the text survives until the user submits, so
 whatever they type next gets concatenated onto it and sent as a prompt.
 
-`/help`, `/context`, and `/status` deliver a `claude-commands-report` custom entry: persisted in
-the session JSONL, rendered by a registered entry renderer, and never sent to the model. Outside
-the TUI they degrade to a plain-text `ctx.ui.notify`.
+`/help` and `/status` deliver a `claude-commands-report` custom entry: persisted in the session
+JSONL, rendered by a registered entry renderer, and never sent to the model. Outside the TUI they
+degrade to a plain-text `ctx.ui.notify`.
+
+`/context` and `/usage` are overlays (`ui.custom`) built from the shared panel machinery in
+`src/panel/`: gauge, text, and table rows laid out by `src/panel/layout.ts`, painted by
+`src/panel/overlay.ts`, and rendered as plain text by the same layout code outside the TUI. They
+persist nothing.
+
+## `/context` attribution
+
+Two numbers are measured: the context window and the used total, both from the provider's report
+for its last request (`ctx.getContextUsage()`). Everything else is pi's own 4-chars-per-token
+estimate over exactly the text pi would send, so categories are comparable to each other but do not
+add up to the measured total.
+
+| Category | Source | Note |
+| --- | --- | --- |
+| System prompt | `ctx.getSystemPrompt()` minus the fragments attributed below | Base prompt, tool list, guidelines. |
+| Project instructions | `getSystemPromptOptions().contextFiles` | Per file; a file is only counted when its content is actually present in the prompt. |
+| Skills catalog | `formatSkillsForPrompt()` over `getSystemPromptOptions().skills` | Names and descriptions only — skill bodies are read on demand. Skills with `disable-model-invocation` are excluded, as they are from the prompt. |
+| Tool schemas | `pi.getAllTools()` filtered by `pi.getActiveTools()` | Name, description, JSON schema. Reported as unavailable, not zero, when the runtime does not bind those actions (`pi -p`). |
+| User messages, Assistant replies, Assistant reasoning, Tool calls, Tool results, Terminal commands, Extension messages, Summaries | `sessionEntryToContextMessages()` over `ctx.sessionManager.buildContextEntries()` | Assistant content is split per block type; tool results are additionally grouped per tool. `!!` bash output is skipped, matching `convertToLlm()`. |
+| Images | The same messages | Counted separately at pi's own flat 4,800-char allowance, so base64 payloads never inflate the text categories. |
+| Free space | Window minus the measured total, or the estimated one when no usage has been reported | The note says which. |
+
+MCP tool schemas have no category: pi has no MCP concept, so an MCP-backed tool arrives through an
+extension and is already counted under Tool schemas.
 
 ## `/usage` sources
 
