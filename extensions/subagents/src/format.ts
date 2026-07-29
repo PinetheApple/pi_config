@@ -4,6 +4,11 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import {
+  formatElapsed,
+  type SubagentSnapshot,
+  type SubagentStatus,
+} from "./domain.ts";
 
 export interface ContextUtilization {
   /** Current conversation context occupancy; undefined while unknown. */
@@ -71,4 +76,72 @@ export function formatActivityStatus(theme: Theme, counts: ActivityCounts) {
   parts.push(theme.fg("accent", "/subagents") + theme.fg("dim", " to view"));
 
   return `${theme.fg("muted", "subagents:")} ${parts.join(theme.fg("dim", " · "))}`;
+}
+
+/** Status colour shared by the above-editor widget and the takeover list. */
+export function statusGlyph(theme: Theme, status: SubagentStatus) {
+  switch (status) {
+    case "running":
+      return theme.fg("warning", SQUARE);
+    case "done":
+      return theme.fg("success", SQUARE);
+    case "error":
+      return theme.fg("error", SQUARE);
+  }
+}
+
+/** Rows the widget shows in full before collapsing the rest into "+N more". */
+const WIDGET_MAX_ROWS = 5;
+const WIDGET_TITLE_MAX = 36;
+
+const clip = (text: string, max: number) =>
+  text.length > max ? `${text.slice(0, max - 1)}…` : text;
+
+/** Running first, then in spawn order, so live work never falls off the cap. */
+const activityRank = (snap: SubagentSnapshot) =>
+  snap.status === "running" ? 0 : 1;
+
+function formatWidgetRow(theme: Theme, snap: SubagentSnapshot) {
+  return `  ${[
+    statusGlyph(theme, snap.status),
+    theme.fg("dim", snap.id),
+    theme.fg("text", clip(snap.title, WIDGET_TITLE_MAX)),
+    theme.fg("muted", `${snap.backend}/${snap.meta.modelLabel ?? "?"}`),
+    theme.fg("dim", formatElapsed(snap)),
+  ].join(" ")}`;
+}
+
+/**
+ * The above-editor widget: a counts header carrying the `/subagents` hint,
+ * then one compact row per subagent. `undefined` when there is nothing to
+ * show, which is also how the widget is cleared.
+ */
+export function formatSubagentWidget(
+  theme: Theme,
+  subs: readonly SubagentSnapshot[],
+) {
+  if (subs.length === 0) return undefined;
+  const running = subs.filter((snap) => snap.status === "running").length;
+  const failed = subs.filter((snap) => snap.status === "error").length;
+  const ordered = subs
+    .map((snap, index) => ({ snap, index }))
+    .sort(
+      (a, b) =>
+        activityRank(a.snap) - activityRank(b.snap) || a.index - b.index,
+    )
+    .map((entry) => entry.snap);
+
+  const lines = [
+    formatActivityStatus(theme, {
+      running,
+      done: subs.length - running - failed,
+      failed,
+    }),
+    ...ordered
+      .slice(0, WIDGET_MAX_ROWS)
+      .map((snap) => formatWidgetRow(theme, snap)),
+  ];
+  const hidden = ordered.length - WIDGET_MAX_ROWS;
+  if (hidden > 0) lines.push(theme.fg("dim", `   +${hidden} more`));
+  return lines;
 }

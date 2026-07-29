@@ -39,7 +39,7 @@ export const SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS = {
   workingDir:
     "Trusted working directory for the autonomous child (default: current working directory)",
   model:
-    'Model hint, interpreted by the chosen harness (pi: "provider/model-id" or model id; claude: model alias like "sonnet"/"opus"; codex: model slug). Omit for the harness default (pi inherits the current model).',
+    'Model hint, interpreted by the chosen harness. pi: a provider-qualified id ("provider/model-id", or a bare id if unambiguous) from this session\'s model registry — a hint that does not resolve is rejected with the list of valid ids, so retry with one of those. claude: an alias ("sonnet"/"opus"/"haiku"). codex: a model slug. Omit for the harness default (pi inherits the current model).',
   reasoningEffort:
     "Reasoning effort on a shared scale; the harness maps it to its nearest native equivalent (pi thinking level, codex reasoning effort, claude thinking budget). Omit for the harness default (pi inherits the current level).",
 };
