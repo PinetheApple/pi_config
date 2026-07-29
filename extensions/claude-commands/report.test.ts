@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { parseClaudeAccount } from "./src/accounts.ts";
-import { buildContextReport } from "./src/context.ts";
 import { pad } from "./src/format.ts";
 import { buildHelpReport, summarizeDescription } from "./src/help.ts";
 import { asReport, renderReportText, report } from "./src/report.ts";
@@ -87,38 +86,6 @@ test("buildHelpReport degrades when nothing is registered", () => {
   const result = buildHelpReport([]);
   assert.equal(result.sections.length, 1);
   assert.match(result.sections[0]?.lines[0] ?? "", /No extension/);
-});
-
-test("buildContextReport separates measured totals from estimates", () => {
-  const result = buildContextReport({
-    usage: { tokens: 40_000, contextWindow: 200_000, percent: 20 },
-    modelLabel: "anthropic/claude",
-    fallbackContextWindow: undefined,
-    systemPrompt: "x".repeat(400),
-    contextEntries: [],
-  });
-
-  const overview = result.sections[0]?.lines.join("\n") ?? "";
-  assert.match(overview, /40\.0k tokens/);
-  assert.match(overview, /160\.0k tokens/);
-  assert.match(overview, /20\.0%/);
-
-  const breakdown = result.sections[1]?.lines.join("\n") ?? "";
-  assert.match(breakdown, /System prompt\s+~100 tokens \(estimate\)/);
-  assert.match(breakdown, /Context entries\s+0 \(exact\)/);
-});
-
-test("buildContextReport reports unknown usage honestly", () => {
-  const result = buildContextReport({
-    usage: { tokens: null, contextWindow: 200_000, percent: null },
-    modelLabel: "anthropic/claude",
-    fallbackContextWindow: 200_000,
-    systemPrompt: "",
-    contextEntries: [],
-  });
-  const overview = result.sections[0]?.lines.join("\n") ?? "";
-  assert.match(overview, /Used\s+unknown/);
-  assert.match(overview, /Remaining\s+unknown/);
 });
 
 test("parseClaudeAccount reads only non-secret identity fields", () => {

@@ -7,12 +7,10 @@
 import { dirname } from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { fetchClaudeQuota } from "./claude.ts";
-import { showUsageOverlay } from "./overlay.ts";
+import { PLAIN_TEXT_WIDTH, renderPanelText } from "../panel/layout.ts";
+import { showPanelOverlay } from "../panel/overlay.ts";
 import { scanSessionDir, summarizeBranch } from "./pi.ts";
-import { buildUsageView, renderUsageText } from "./view.ts";
-
-/** Width assumed when rendering usage outside a terminal. */
-const PLAIN_TEXT_WIDTH = 72;
+import { buildUsageView } from "./view.ts";
 
 export async function collectUsage(ctx: ExtensionCommandContext) {
   const now = new Date();
@@ -36,8 +34,8 @@ export async function collectUsage(ctx: ExtensionCommandContext) {
 export async function showUsage(ctx: ExtensionCommandContext) {
   const view = await collectUsage(ctx);
   if (ctx.mode === "tui") {
-    await showUsageOverlay(ctx, view);
+    await showPanelOverlay(ctx, view);
     return;
   }
-  ctx.ui.notify(renderUsageText(view, PLAIN_TEXT_WIDTH), "info");
+  ctx.ui.notify(renderPanelText(view, PLAIN_TEXT_WIDTH), "info");
 }
