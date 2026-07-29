@@ -29,6 +29,7 @@ import {
   type AgentTransport,
 } from "../shared/workflow-transport.ts";
 import { createRoleSetupHook, ROLE_HOOK_NAME } from "./src/roles.ts";
+import { withWorkflowGuidance } from "./src/tool-guidance.ts";
 
 /** Resolved at runtime: the package is installed by the user, not vendored. */
 const WORKFLOW_PACKAGE = "pi-extensible-workflows";
@@ -123,7 +124,9 @@ export default async function (pi: ExtensionAPI) {
     ...EXTENSION_METADATA,
     agentSetupHooks: { [ROLE_HOOK_NAME]: roles.hook },
   });
-  host(pi, undefined, undefined, transport);
+  // The package teaches the tool's options but not its source language, so its
+  // `workflow` registration is decorated on the way through.
+  host(withWorkflowGuidance(pi), undefined, undefined, transport);
 
   // Warnings surface when the role is actually used, not at load: a warning
   // about an agent this session never spawns is noise, and at spawn time it
