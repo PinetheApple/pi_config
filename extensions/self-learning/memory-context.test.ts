@@ -13,6 +13,33 @@ test("the slug is the cwd with slashes replaced by dashes", () => {
   );
 });
 
+test("an underscore in a path segment collapses to a dash", () => {
+  // The live store is `-home-pineapple-Development-music-app`, not `music_app`.
+  assert.equal(
+    projectSlug("/home/pineapple/Development/music_app"),
+    "-home-pineapple-Development-music-app",
+  );
+});
+
+test("a dot in a path segment collapses to a dash", () => {
+  assert.equal(
+    projectSlug("/home/pineapple/.pi/agent"),
+    "-home-pineapple--pi-agent",
+  );
+  assert.equal(
+    projectSlug("/home/pineapple/Work/site.v2"),
+    "-home-pineapple-Work-site-v2",
+  );
+});
+
+test("existing dashes, digits and case survive unchanged", () => {
+  assert.equal(
+    projectSlug("/home/pineapple/Work/clients/Seyfor-Minimax"),
+    "-home-pineapple-Work-clients-Seyfor-Minimax",
+  );
+  assert.equal(projectSlug("/tmp/claude-1000"), "-tmp-claude-1000");
+});
+
 test("a claude worktree resolves to its parent project slug", () => {
   assert.equal(
     projectSlug(
