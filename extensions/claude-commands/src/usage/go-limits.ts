@@ -11,7 +11,7 @@
 
 import { formatCost } from "../format.ts";
 import type { ModelBucket } from "./pi.ts";
-import type { GaugeRow } from "./rows.ts";
+import type { GaugeRow } from "../panel/rows.ts";
 import type { UsageWindow } from "./window.ts";
 
 export const GO_PROVIDER = "opencode-go";

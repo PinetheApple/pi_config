@@ -1,4 +1,4 @@
-/** Dismissable /usage overlay. Nothing is written to the transcript. */
+/** Dismissable panel overlay. Nothing is written to the transcript. */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -9,14 +9,9 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { Severity } from "./bar.ts";
+import { gaugeLines, layoutGauge, textRowLine } from "./layout.ts";
+import type { PanelRow, PanelView } from "./rows.ts";
 import { layoutTable } from "./table.ts";
-import {
-  gaugeLines,
-  layoutGauge,
-  textRowLine,
-  type UsageRow,
-  type UsageView,
-} from "./view.ts";
 
 const SCROLL_STEP = 3;
 const BORDER_COLUMNS = 2;
@@ -27,8 +22,8 @@ const CHROME_ROWS = 2;
 const HINTS =
   "j/k or ↑/↓ scroll · ctrl-d/u page · g/G top/bottom · esc/q close";
 
-/** The slice of Theme the usage body needs, so it can be stubbed in tests. */
-export type UsageTheme = Pick<Theme, "fg" | "bold">;
+/** The slice of Theme the panel body needs, so it can be stubbed in tests. */
+export type PanelTheme = Pick<Theme, "fg" | "bold">;
 
 const SEVERITY_COLORS: Record<Severity, Parameters<Theme["fg"]>[0]> = {
   unknown: "muted",
@@ -37,7 +32,7 @@ const SEVERITY_COLORS: Record<Severity, Parameters<Theme["fg"]>[0]> = {
   critical: "error",
 };
 
-function styleRow(row: UsageRow, width: number, theme: UsageTheme) {
+function styleRow(row: PanelRow, width: number, theme: PanelTheme) {
   if (row.kind === "text") {
     return wrapTextWithAnsi(textRowLine(row), width).map((line) =>
       theme.fg(row.dim ? "dim" : "text", line),
@@ -64,14 +59,18 @@ function styleRow(row: UsageRow, width: number, theme: UsageTheme) {
 }
 
 export function buildOverlayLines(
-  view: UsageView,
+  view: PanelView,
   width: number,
-  theme: UsageTheme,
+  theme: PanelTheme,
 ) {
   const lines: string[] = [];
   for (const section of view.sections) {
     if (lines.length > 0) lines.push("");
-    lines.push(theme.bold(theme.fg("accent", section.heading)));
+    lines.push(
+      theme.bold(
+        theme.fg("accent", truncateToWidth(section.heading, width, "…")),
+      ),
+    );
     for (const row of section.rows) lines.push(...styleRow(row, width, theme));
   }
   lines.push("");
@@ -96,7 +95,7 @@ function border(theme: Theme, width: number, label: string, top: boolean) {
   );
 }
 
-export async function showUsageOverlay(ctx: ExtensionContext, view: UsageView) {
+export async function showPanelOverlay(ctx: ExtensionContext, view: PanelView) {
   await ctx.ui.custom<void>(
     (tui, theme, _keybindings, done) => {
       let offset = 0;

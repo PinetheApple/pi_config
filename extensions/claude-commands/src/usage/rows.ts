@@ -1,47 +1,16 @@
 /**
- * The /usage row vocabulary and the builders that turn windowed totals into
- * tables. Kept apart from view.ts so the section builders stay readable.
+ * The builders that turn windowed totals into /usage tables. Kept apart from
+ * view.ts so the section builders stay readable.
  */
 
 import type { UsageSummary } from "../../../shared/usage-totals.ts";
 import { formatCost, formatTokens } from "../format.ts";
-import type { TableSpec } from "./table.ts";
+import type { PanelRow } from "../panel/rows.ts";
+import type { TableSpec } from "../panel/table.ts";
 import { USAGE_WINDOWS, type UsageWindow } from "./window.ts";
 
 /** The label and the headline token count survive any terminal width. */
 const MIN_TABLE_COLUMNS = 2;
-
-export interface GaugeRow {
-  kind: "gauge";
-  label: string;
-  fraction: number | undefined;
-  note?: string;
-}
-
-export interface TextRow {
-  kind: "text";
-  label?: string;
-  value: string;
-  dim?: boolean;
-}
-
-export interface TableRow {
-  kind: "table";
-  spec: TableSpec;
-}
-
-export type UsageRow = GaugeRow | TextRow | TableRow;
-
-export interface UsageSection {
-  heading: string;
-  rows: UsageRow[];
-}
-
-export interface UsageView {
-  title: string;
-  sections: UsageSection[];
-  footer: string;
-}
 
 /** One row of a usage table: a name, its totals, and how many records made it. */
 export interface UsageEntry {
@@ -91,7 +60,7 @@ function isActive(entry: UsageEntry) {
 export function windowRows(
   entryOf: (window: UsageWindow) => UsageEntry,
   countHeader: string,
-): UsageRow[] {
+): PanelRow[] {
   const active: UsageEntry[] = [];
   const idle: string[] = [];
   for (const window of USAGE_WINDOWS) {
@@ -104,7 +73,7 @@ export function windowRows(
     return [{ kind: "text", value: "no recorded activity", dim: true }];
   }
 
-  const rows: UsageRow[] = [
+  const rows: PanelRow[] = [
     { kind: "table", spec: windowsTable(active, countHeader) },
   ];
   if (idle.length > 0) {
@@ -115,8 +84,4 @@ export function windowRows(
     });
   }
   return rows;
-}
-
-export function sourceRow(path: string, what: string): TextRow {
-  return { kind: "text", value: `Source: ${path} — ${what}`, dim: true };
 }

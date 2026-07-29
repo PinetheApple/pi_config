@@ -1,15 +1,15 @@
 /**
  * Claude-Code-parity slash commands for pi.
  *
- * Only commands pi does not already ship are registered here. `/help`,
- * `/context` and `/status` deliver `claude-commands-report` custom entries,
- * which are persisted in the session but never enter LLM context. `/usage`
- * opens a dismissable overlay and persists nothing.
+ * Only commands pi does not already ship are registered here. `/help` and
+ * `/status` deliver `claude-commands-report` custom entries, which are
+ * persisted in the session but never enter LLM context. `/context` and
+ * `/usage` open dismissable overlays and persist nothing.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerAliases } from "./src/aliases.ts";
-import { buildContextReport } from "./src/context.ts";
+import { showContext } from "./src/context/index.ts";
 import { buildHelpReport } from "./src/help.ts";
 import { buildStatusReport } from "./src/status.ts";
 import { present, registerReportRenderer } from "./src/ui.ts";
@@ -27,21 +27,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("context", {
-    description: "Show the context-window breakdown for this session",
+    description: "Show what is occupying the context window",
     handler: async (_args, ctx) => {
-      present(
-        pi,
-        ctx,
-        buildContextReport({
-          usage: ctx.getContextUsage(),
-          modelLabel: ctx.model
-            ? `${ctx.model.provider}/${ctx.model.id}`
-            : "none selected",
-          fallbackContextWindow: ctx.model?.contextWindow,
-          systemPrompt: ctx.getSystemPrompt(),
-          contextEntries: ctx.sessionManager.buildContextEntries(),
-        }),
-      );
+      await showContext(pi, ctx);
     },
   });
 
