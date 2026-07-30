@@ -46,6 +46,9 @@ export const runCommand: CommandRunner = (command, args, options) =>
         resolve({ code, stdout, stderr });
       },
     );
+    // A child that exits without reading stdin (`gh auth status`) EPIPEs this
+    // write, and an unhandled stdin error would take the whole agent down.
+    child.stdin?.on("error", () => {});
     child.stdin?.end(options.stdin ?? "");
   });
 

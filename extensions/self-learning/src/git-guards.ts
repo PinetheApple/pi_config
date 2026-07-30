@@ -1,6 +1,4 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { readOptionalFile, type CommandRunner } from "./exec.ts";
+import type { CommandRunner, RunOptions } from "./exec.ts";
 
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -42,19 +40,55 @@ export function identityChecksFor(command: string): IdentityChecks | undefined {
   return undefined;
 }
 
+/**
+ * How the ~/scripts/gh wrapper will resolve a token for this directory. Carries
+ * no token material: the comparison happens where the values are read, and only
+ * its outcome travels.
+ */
+export type GhTokenMapping =
+  /** The gh check does not apply, so no lookup ran. */
+  | { state: "unchecked" }
+  /** A token is stored for `wantUser` and the wrapper is free to inject it. */
+  | { state: "mapped" }
+  /** No token is stored for `wantUser`, so the wrapper cannot map this repo. */
+  | { state: "unmapped" }
+  /** An inherited env token pre-empts the wrapper's mapping entirely. */
+  | { state: "env-token"; variable: string; matchesIdentity: boolean };
+
 export interface GitIdentity {
   repoRoot: string;
   wantUser: string;
   wantEmail: string;
-  ghActiveUser: string;
+  ghMapping: GhTokenMapping;
   localCommitEmail: string;
+}
+
+function ghMappingProblem(mapping: GhTokenMapping, wantUser: string) {
+  switch (mapping.state) {
+    case "unmapped":
+      return (
+        `no gh token is stored for '${wantUser}', the account this directory ` +
+        "resolves to, so the gh wrapper cannot map it and gh would fall back to " +
+        `its global active account (fix: gh auth login as ${wantUser} — not ` +
+        "gh auth switch, which is global state that races between sessions)"
+      );
+    case "env-token":
+      return mapping.matchesIdentity
+        ? undefined
+        : `${mapping.variable} is set in the environment, which the gh wrapper ` +
+            "defers to instead of mapping this directory, and it is not the token " +
+            `stored for '${wantUser}' (fix: unset ${mapping.variable} and let the ` +
+            "wrapper select the account this directory resolves to)";
+    default:
+      return undefined;
+  }
 }
 
 export function identityDenial(
   checks: IdentityChecks,
   identity: GitIdentity,
 ): string | undefined {
-  const { repoRoot, wantUser, wantEmail, ghActiveUser, localCommitEmail } =
+  const { repoRoot, wantUser, wantEmail, ghMapping, localCommitEmail } =
     identity;
 
   if (!wantUser || !wantEmail) {
@@ -66,12 +100,10 @@ export function identityDenial(
   }
 
   const problems: string[] = [];
-  if (checks.gh && ghActiveUser && ghActiveUser !== wantUser) {
-    problems.push(
-      `gh's active account is '${ghActiveUser}' but this directory's git identity ` +
-        `is '${wantUser}' (fix: gh auth switch -u ${wantUser})`,
-    );
-  }
+  const ghProblem = checks.gh
+    ? ghMappingProblem(ghMapping, wantUser)
+    : undefined;
+  if (ghProblem) problems.push(ghProblem);
   if (checks.git && localCommitEmail && localCommitEmail !== wantEmail) {
     problems.push(
       `this repo overrides user.email to '${localCommitEmail}', against the ` +
@@ -84,41 +116,68 @@ export function identityDenial(
   return `Wrong identity for ${repoRoot}. ${detail}`.trimEnd();
 }
 
-/** Mirrors the hook's awk over hosts.yml: the last indented `user:` line wins. */
-export function parseGhActiveUser(hostsYaml: string) {
-  let user = "";
-  for (const line of hostsYaml.split("\n")) {
-    const match = /^\s+user:\s+(\S+)/.exec(line);
-    if (match) user = match[1];
+/** gh prefers GH_TOKEN, and the wrapper skips its mapping if either is set. */
+const GH_TOKEN_VARIABLES = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+function inheritedGhToken() {
+  for (const variable of GH_TOKEN_VARIABLES) {
+    const value = process.env[variable];
+    if (value) return { variable, value };
   }
-  return user;
+  return undefined;
 }
 
-function ghHostsPath() {
-  const base = process.env.GH_CONFIG_DIR || join(homedir(), ".config", "gh");
-  return join(base, "hosts.yml");
+/**
+ * Verifies the wrapper's mapping rather than gh's global active account: it
+ * looks up `wantUser`'s stored token, which is a local keyring read that no env
+ * token influences, and never lets that value out of this function.
+ */
+async function resolveGhMapping(
+  run: CommandRunner,
+  options: RunOptions,
+  wantUser: string,
+): Promise<GhTokenMapping> {
+  const stored = await run(
+    "gh",
+    ["auth", "token", "--user", wantUser],
+    options,
+  );
+  const expected = stored.code === 0 ? stored.stdout.trim() : "";
+  if (!expected) return { state: "unmapped" };
+
+  const inherited = inheritedGhToken();
+  if (!inherited) return { state: "mapped" };
+  return {
+    state: "env-token",
+    variable: inherited.variable,
+    matchesIdentity: inherited.value === expected,
+  };
 }
 
 export async function collectGitIdentity(
   run: CommandRunner,
   cwd: string,
+  checks: IdentityChecks,
 ): Promise<GitIdentity | undefined> {
   const options = { cwd, timeoutMs: GIT_TIMEOUT_MS };
   const root = await run("git", ["rev-parse", "--show-toplevel"], options);
   if (root.code !== 0 || !root.stdout.trim()) return undefined;
 
-  const [user, email, localEmail, hostsYaml] = await Promise.all([
+  const [user, email, localEmail] = await Promise.all([
     run("git", ["config", "user.name"], options),
     run("git", ["config", "user.email"], options),
     run("git", ["config", "--get", "--local", "user.email"], options),
-    readOptionalFile(ghHostsPath()),
   ]);
+  const wantUser = user.stdout.trim();
 
   return {
     repoRoot: root.stdout.trim(),
-    wantUser: user.stdout.trim(),
+    wantUser,
     wantEmail: email.stdout.trim(),
-    ghActiveUser: parseGhActiveUser(hostsYaml),
+    ghMapping:
+      checks.gh && wantUser
+        ? await resolveGhMapping(run, options, wantUser)
+        : { state: "unchecked" },
     localCommitEmail: localEmail.stdout.trim(),
   };
 }
