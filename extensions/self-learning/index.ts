@@ -59,7 +59,7 @@ export default function selfLearning(pi: ExtensionAPI) {
 
     const checks = identityChecksFor(command);
     if (checks) {
-      const identity = await collectGitIdentity(runCommand, ctx.cwd);
+      const identity = await collectGitIdentity(runCommand, ctx.cwd, checks);
       const denial = identity && identityDenial(checks, identity);
       if (denial) return { block: true, reason: denial };
     }
